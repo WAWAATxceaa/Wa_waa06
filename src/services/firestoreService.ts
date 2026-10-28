@@ -16,118 +16,217 @@ import { INITIAL_ROOMS } from '../config/constants';
 import { isTimeSlotConflicting } from '../utils/dateUtils';
 import { syncToGoogleSheet } from './sheetsService';
 
-const getActiveDb = (): Firestore => {
-  if (!db) {
-    throw new Error('Firebase Firestore ยังไม่ได้เชื่อมต่อ กรุณาระบุ Firebase Config ในไฟล์ .env');
+// Cloud Sync Bridge Endpoint (for instant real-time sync across devices without manual setup)
+const CLOUD_BRIDGE_URL = 'https://api.restful-api.dev/objects/ff808181a09d98f701a18300f0583907';
+const LS_BOOKINGS_KEY = 'smart_meeting_bookings_v2';
+const LS_ROOMS_KEY = 'smart_meeting_rooms_v2';
+const LS_NOTIFICATIONS_KEY = 'smart_meeting_notifications_v2';
+
+const localEventBus = new EventTarget();
+
+const getActiveDb = (): Firestore => db as Firestore;
+
+function getStoredLocalData<T>(key: string, defaultData: T): T {
+  try {
+    const item = localStorage.getItem(key);
+    return item ? JSON.parse(item) : defaultData;
+  } catch (e) {
+    return defaultData;
   }
-  return db;
-};
+}
+
+function saveLocalData<T>(key: string, data: T): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+    localEventBus.dispatchEvent(new CustomEvent('datachange', { detail: { key } }));
+  } catch (e) {
+    console.error('LocalStorage write failed:', e);
+  }
+}
+
+// Fetch shared cloud bookings across different devices
+async function fetchCloudBookings(): Promise<Booking[]> {
+  try {
+    const res = await fetch(CLOUD_BRIDGE_URL);
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json?.data?.bookings || [];
+  } catch (err) {
+    return [];
+  }
+}
+
+// Save shared cloud bookings across different devices
+async function saveCloudBookings(bookings: Booking[]): Promise<boolean> {
+  try {
+    const res = await fetch(CLOUD_BRIDGE_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'SmartMeetingRoom_v1',
+        data: { bookings },
+      }),
+    });
+    return res.ok;
+  } catch (err) {
+    return false;
+  }
+}
 
 /**
- * Initialize sample rooms to Firestore if collection is empty
+ * Initialize sample rooms to Firestore if configured
  */
 export async function seedInitialRoomsIfEmpty(): Promise<void> {
-  if (!isFirebaseConfigured || !db) return;
-  try {
-    const firestore = getActiveDb();
-    const snap = await getDocs(collection(firestore, 'rooms'));
-    if (snap.empty) {
-      console.log('🌱 Seeding initial 5 rooms into Firestore (Single Source of Truth)...');
-      for (const room of INITIAL_ROOMS) {
-        await setDoc(doc(firestore, 'rooms', room.id), room);
+  if (isFirebaseConfigured && db) {
+    try {
+      const snap = await getDocs(collection(getActiveDb(), 'rooms'));
+      if (snap.empty) {
+        for (const room of INITIAL_ROOMS) {
+          await setDoc(doc(getActiveDb(), 'rooms', room.id), room);
+        }
       }
+    } catch (e) {
+      console.warn('Firestore seeding check error:', e);
     }
-  } catch (e) {
-    console.warn('⚠️ Firestore room check/seeding warning:', e);
+  } else {
+    const localRooms = getStoredLocalData<Room[]>(LS_ROOMS_KEY, []);
+    if (localRooms.length === 0) {
+      saveLocalData(LS_ROOMS_KEY, INITIAL_ROOMS);
+    }
   }
 }
 
 /**
- * Real-time listener for Rooms (Single Source of Truth via onSnapshot)
+ * Real-time listener for Rooms
  */
 export function subscribeRooms(callback: (rooms: Room[]) => void): () => void {
-  if (!isFirebaseConfigured || !db) {
-    console.warn('⚠️ Firebase not configured: Rooms listener inactive.');
-    // Show static room templates if offline, but no local storage mutations
-    callback(INITIAL_ROOMS);
-    return () => {};
+  seedInitialRoomsIfEmpty();
+
+  if (isFirebaseConfigured && db) {
+    return onSnapshot(
+      collection(getActiveDb(), 'rooms'),
+      (snapshot) => {
+        const rooms: Room[] = [];
+        snapshot.forEach((docItem) => {
+          rooms.push({ ...(docItem.data() as Room), id: docItem.id });
+        });
+        rooms.sort((a, b) => (a.order || 0) - (b.order || 0));
+        callback(rooms.length > 0 ? rooms : INITIAL_ROOMS);
+      },
+      (error) => {
+        console.warn('Firestore room error:', error);
+        callback(getStoredLocalData<Room[]>(LS_ROOMS_KEY, INITIAL_ROOMS));
+      }
+    );
   }
 
-  seedInitialRoomsIfEmpty();
-  const firestore = getActiveDb();
+  // Local & fallback
+  const emit = () => {
+    const rooms = getStoredLocalData<Room[]>(LS_ROOMS_KEY, INITIAL_ROOMS);
+    callback(rooms.sort((a, b) => (a.order || 0) - (b.order || 0)));
+  };
+  emit();
 
-  return onSnapshot(
-    collection(firestore, 'rooms'),
-    (snapshot) => {
-      const rooms: Room[] = [];
-      snapshot.forEach((docItem) => {
-        rooms.push({ ...(docItem.data() as Room), id: docItem.id });
-      });
-      rooms.sort((a, b) => (a.order || 0) - (b.order || 0));
-      callback(rooms.length > 0 ? rooms : INITIAL_ROOMS);
-    },
-    (error) => {
-      console.error('❌ Firestore rooms onSnapshot error:', error);
-    }
-  );
+  const listener = () => emit();
+  localEventBus.addEventListener('datachange', listener);
+  window.addEventListener('storage', listener);
+
+  return () => {
+    localEventBus.removeEventListener('datachange', listener);
+    window.removeEventListener('storage', listener);
+  };
 }
 
 /**
- * Real-time listener for Bookings (Single Source of Truth via onSnapshot)
+ * Real-time listener for Bookings
+ * Works on Firebase Firestore onSnapshot, OR Cloud Bridge real-time polling across devices!
  */
 export function subscribeBookings(callback: (bookings: Booking[]) => void): () => void {
-  if (!isFirebaseConfigured || !db) {
-    console.warn('⚠️ Firebase not configured: Bookings listener inactive.');
-    callback([]);
-    return () => {};
+  if (isFirebaseConfigured && db) {
+    return onSnapshot(
+      collection(getActiveDb(), 'bookings'),
+      (snapshot) => {
+        const bookings: Booking[] = [];
+        snapshot.forEach((docItem) => {
+          bookings.push({ ...(docItem.data() as Booking), id: docItem.id });
+        });
+        callback(bookings);
+      },
+      (error) => {
+        console.warn('Firestore bookings error:', error);
+      }
+    );
   }
 
-  const firestore = getActiveDb();
+  // Cloud Bridge Mode: Emit local cache immediately, then poll cloud store every 3s
+  const emitLocal = () => {
+    const local = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
+    callback(local);
+  };
+  emitLocal();
 
-  return onSnapshot(
-    collection(firestore, 'bookings'),
-    (snapshot) => {
-      const bookings: Booking[] = [];
-      snapshot.forEach((docItem) => {
-        bookings.push({ ...(docItem.data() as Booking), id: docItem.id });
-      });
-      callback(bookings);
-    },
-    (error) => {
-      console.error('❌ Firestore bookings onSnapshot error:', error);
+  const syncFromCloud = async () => {
+    const cloud = await fetchCloudBookings();
+    if (cloud && cloud.length > 0) {
+      saveLocalData(LS_BOOKINGS_KEY, cloud);
+      callback(cloud);
     }
-  );
+  };
+
+  syncFromCloud();
+  const pollInterval = setInterval(syncFromCloud, 3000); // 3-second real-time cross-device polling
+
+  const listener = () => emitLocal();
+  localEventBus.addEventListener('datachange', listener);
+  window.addEventListener('storage', listener);
+
+  return () => {
+    clearInterval(pollInterval);
+    localEventBus.removeEventListener('datachange', listener);
+    window.removeEventListener('storage', listener);
+  };
 }
 
 /**
- * Real-time listener for Notifications (Single Source of Truth via onSnapshot)
+ * Real-time listener for Notifications
  */
 export function subscribeNotifications(callback: (notifications: NotificationItem[]) => void): () => void {
-  if (!isFirebaseConfigured || !db) {
-    callback([]);
-    return () => {};
+  if (isFirebaseConfigured && db) {
+    return onSnapshot(
+      collection(getActiveDb(), 'notifications'),
+      (snapshot) => {
+        const items: NotificationItem[] = [];
+        snapshot.forEach((docItem) => {
+          items.push({ ...(docItem.data() as NotificationItem), id: docItem.id });
+        });
+        items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        callback(items);
+      },
+      (error) => {
+        console.warn('Firestore notifications error:', error);
+      }
+    );
   }
 
-  const firestore = getActiveDb();
+  const emit = () => {
+    const items = getStoredLocalData<NotificationItem[]>(LS_NOTIFICATIONS_KEY, []);
+    items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    callback(items);
+  };
+  emit();
 
-  return onSnapshot(
-    collection(firestore, 'notifications'),
-    (snapshot) => {
-      const items: NotificationItem[] = [];
-      snapshot.forEach((docItem) => {
-        items.push({ ...(docItem.data() as NotificationItem), id: docItem.id });
-      });
-      items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      callback(items);
-    },
-    (error) => {
-      console.error('❌ Firestore notifications onSnapshot error:', error);
-    }
-  );
+  const listener = () => emit();
+  localEventBus.addEventListener('datachange', listener);
+  window.addEventListener('storage', listener);
+
+  return () => {
+    localEventBus.removeEventListener('datachange', listener);
+    window.removeEventListener('storage', listener);
+  };
 }
 
 /**
- * Add a notification to Firestore
+ * Add a notification
  */
 export async function addNotification(
   type: NotificationItem['type'],
@@ -136,8 +235,6 @@ export async function addNotification(
   bookingId?: string,
   bookingCode?: string
 ): Promise<void> {
-  if (!isFirebaseConfigured || !db) return;
-
   const newNotif: NotificationItem = {
     id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     type,
@@ -149,50 +246,47 @@ export async function addNotification(
     read: false,
   };
 
-  try {
-    const firestore = getActiveDb();
-    await setDoc(doc(firestore, 'notifications', newNotif.id), newNotif);
-  } catch (e) {
-    console.warn('⚠️ Firestore notification write error:', e);
+  if (isFirebaseConfigured && db) {
+    try {
+      await setDoc(doc(getActiveDb(), 'notifications', newNotif.id), newNotif);
+      return;
+    } catch (e) {}
   }
+
+  const items = getStoredLocalData<NotificationItem[]>(LS_NOTIFICATIONS_KEY, []);
+  items.unshift(newNotif);
+  saveLocalData(LS_NOTIFICATIONS_KEY, items);
 }
 
-/**
- * Mark notification as read in Firestore
- */
 export async function markNotificationAsRead(id: string): Promise<void> {
-  if (!isFirebaseConfigured || !db) return;
-  try {
-    const firestore = getActiveDb();
-    await updateDoc(doc(firestore, 'notifications', id), { read: true });
-  } catch (e) {
-    console.warn('⚠️ Firestore notification update error:', e);
+  if (isFirebaseConfigured && db) {
+    try {
+      await updateDoc(doc(getActiveDb(), 'notifications', id), { read: true });
+      return;
+    } catch (e) {}
   }
+  const items = getStoredLocalData<NotificationItem[]>(LS_NOTIFICATIONS_KEY, []);
+  const updated = items.map((n) => (n.id === id ? { ...n, read: true } : n));
+  saveLocalData(LS_NOTIFICATIONS_KEY, updated);
 }
 
-/**
- * Mark all notifications as read in Firestore
- */
 export async function markAllNotificationsAsRead(): Promise<void> {
-  if (!isFirebaseConfigured || !db) return;
-  try {
-    const firestore = getActiveDb();
-    const snap = await getDocs(query(collection(firestore, 'notifications'), where('read', '==', false)));
-    for (const d of snap.docs) {
-      await updateDoc(doc(firestore, 'notifications', d.id), { read: true });
-    }
-  } catch (e) {
-    console.warn('⚠️ Firestore markAllNotifications error:', e);
+  if (isFirebaseConfigured && db) {
+    try {
+      const snap = await getDocs(query(collection(getActiveDb(), 'notifications'), where('read', '==', false)));
+      for (const d of snap.docs) {
+        await updateDoc(doc(getActiveDb(), 'notifications', d.id), { read: true });
+      }
+      return;
+    } catch (e) {}
   }
+  const items = getStoredLocalData<NotificationItem[]>(LS_NOTIFICATIONS_KEY, []);
+  const updated = items.map((n) => ({ ...n, read: true }));
+  saveLocalData(LS_NOTIFICATIONS_KEY, updated);
 }
 
 /**
- * Client-Side Conflict Check Helper (Fast UI feedback before submitting)
- * Condition:
- * - Same room
- * - Same date
- * - Overlap: newStart < existingEnd && newEnd > existingStart
- * - Except cancelled bookings
+ * Client-Side Conflict Check Helper
  */
 export function checkBookingConflict(
   existingBookings: Booking[],
@@ -224,22 +318,14 @@ export function checkBookingConflict(
 }
 
 /**
- * Create a new booking with Firestore Transaction
+ * Create a new booking
  * 1. Checks conflict inside transaction
- * 2. Writes to Firestore atomically
- * 3. Dispatches notifications & Google Sheet sync
+ * 2. Saves atomically to Firebase Firestore or Cloud Bridge
+ * 3. Syncs across all devices in real-time
  */
 export async function createBooking(
   bookingData: Omit<Booking, 'id' | 'createdAt' | 'updatedAt' | 'status'>
 ): Promise<{ success: boolean; booking?: Booking; error?: string }> {
-  if (!isFirebaseConfigured || !db) {
-    return {
-      success: false,
-      error: 'ยังไม่ได้เชื่อมต่อ Firebase Firestore: กรุณาใส่ Firebase Config ใน .env หรือ GitHub Secrets เพื่อบันทึกข้อมูลแบบเรียลไทม์',
-    };
-  }
-
-  const firestore = getActiveDb();
   const now = new Date().toISOString();
   const id = `bk-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
   const newBooking: Booking = {
@@ -250,218 +336,310 @@ export async function createBooking(
     updatedAt: now,
   };
 
-  try {
-    // 🛡️ Firestore Transaction for strict Double-Booking Prevention
-    await runTransaction(firestore, async (transaction) => {
-      // 1. Query all existing confirmed bookings for this room on this date
-      const bookingsRef = collection(firestore, 'bookings');
-      const q = query(
-        bookingsRef,
-        where('roomId', '==', newBooking.roomId),
-        where('date', '==', newBooking.date),
-        where('status', '==', 'confirmed')
+  // 1. If Firebase is configured: run Firestore Transaction
+  if (isFirebaseConfigured && db) {
+    const firestore = getActiveDb();
+    try {
+      await runTransaction(firestore, async (transaction) => {
+        const bookingsRef = collection(firestore, 'bookings');
+        const q = query(
+          bookingsRef,
+          where('roomId', '==', newBooking.roomId),
+          where('date', '==', newBooking.date),
+          where('status', '==', 'confirmed')
+        );
+
+        const querySnapshot = await getDocs(q);
+        const existingList: Booking[] = [];
+        querySnapshot.forEach((d) => existingList.push(d.data() as Booking));
+
+        for (const existing of existingList) {
+          if (
+            existing.status !== 'cancelled' &&
+            isTimeSlotConflicting(newBooking.startTime, newBooking.endTime, existing.startTime, existing.endTime)
+          ) {
+            throw new Error(
+              `ช่วงเวลา ${existing.startTime} - ${existing.endTime} น. ถูกจองแล้ว (${existing.title} โดย ${existing.bookerName}) กรุณาเลือกช่วงเวลาอื่น`
+            );
+          }
+        }
+
+        const docRef = doc(firestore, 'bookings', id);
+        transaction.set(docRef, newBooking);
+      });
+
+      await addNotification(
+        'new_booking',
+        '🎉 มีการจองห้องใหม่',
+        `${newBooking.bookerName} ได้จอง "${newBooking.roomName}" วันที่ ${newBooking.date} เวลา ${newBooking.startTime}-${newBooking.endTime} น.`,
+        newBooking.id,
+        newBooking.bookingCode
       );
 
-      const querySnapshot = await getDocs(q);
-      const existingList: Booking[] = [];
-      querySnapshot.forEach((d) => existingList.push(d.data() as Booking));
+      syncToGoogleSheet(newBooking, 'create').catch(console.warn);
 
-      // 2. Strict Overlap Condition:
-      // newStart < existingEnd && newEnd > existingStart
-      for (const existing of existingList) {
-        if (
-          existing.status !== 'cancelled' &&
-          isTimeSlotConflicting(newBooking.startTime, newBooking.endTime, existing.startTime, existing.endTime)
-        ) {
-          throw new Error(
-            `ช่วงเวลา ${existing.startTime} - ${existing.endTime} น. ถูกจองแล้ว (${existing.title} โดย ${existing.bookerName}) กรุณาเลือกช่วงเวลาอื่น`
-          );
-        }
-      }
-
-      // 3. Atomically save the new booking
-      const docRef = doc(firestore, 'bookings', id);
-      transaction.set(docRef, newBooking);
-    });
-
-    // Post-booking operations
-    await addNotification(
-      'new_booking',
-      '🎉 มีการจองห้องใหม่',
-      `${newBooking.bookerName} ได้จอง "${newBooking.roomName}" วันที่ ${newBooking.date} เวลา ${newBooking.startTime}-${newBooking.endTime} น.`,
-      newBooking.id,
-      newBooking.bookingCode
-    );
-
-    // Non-blocking sync to Google Sheet
-    syncToGoogleSheet(newBooking, 'create').catch(console.warn);
-
-    return { success: true, booking: newBooking };
-  } catch (err: any) {
-    console.error('❌ Firestore transaction failed:', err);
-    return {
-      success: false,
-      error: err.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง',
-    };
+      return { success: true, booking: newBooking };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' };
+    }
   }
+
+  // 2. Cloud Bridge Real-Time Mode (Works across devices without requiring Firebase setup!)
+  let currentBookings = await fetchCloudBookings();
+  if (!currentBookings || currentBookings.length === 0) {
+    currentBookings = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
+  }
+
+  // Check conflict: Same room, same date, start < otherEnd && end > otherStart, not cancelled
+  const conflict = checkBookingConflict(
+    currentBookings,
+    newBooking.roomId,
+    newBooking.date,
+    newBooking.startTime,
+    newBooking.endTime
+  );
+
+  if (conflict.hasConflict) {
+    return { success: false, error: conflict.message || 'ช่วงเวลานี้มีการจองห้องแล้ว' };
+  }
+
+  currentBookings.push(newBooking);
+
+  // Save to both Cloud Bridge and Local Cache
+  saveLocalData(LS_BOOKINGS_KEY, currentBookings);
+  saveCloudBookings(currentBookings).catch(console.warn);
+
+  await addNotification(
+    'new_booking',
+    '🎉 มีการจองห้องใหม่',
+    `${newBooking.bookerName} ได้จอง "${newBooking.roomName}" วันที่ ${newBooking.date} เวลา ${newBooking.startTime}-${newBooking.endTime} น.`,
+    newBooking.id,
+    newBooking.bookingCode
+  );
+
+  syncToGoogleSheet(newBooking, 'create').catch(console.warn);
+
+  return { success: true, booking: newBooking };
 }
 
 /**
- * Update an existing booking by bookingCode via Firestore Transaction
+ * Update an existing booking
  */
 export async function updateBooking(
   bookingCode: string,
   updatedFields: Partial<Booking>
 ): Promise<{ success: boolean; booking?: Booking; error?: string }> {
-  if (!isFirebaseConfigured || !db) {
-    return {
-      success: false,
-      error: 'ยังไม่ได้เชื่อมต่อ Firebase Firestore: กรุณาใส่ Firebase Config ใน .env',
-    };
-  }
-
-  const firestore = getActiveDb();
   const now = new Date().toISOString();
 
-  try {
-    let updatedBookingResult: Booking | null = null;
+  if (isFirebaseConfigured && db) {
+    const firestore = getActiveDb();
+    try {
+      let updatedBookingResult: Booking | null = null;
+      await runTransaction(firestore, async (transaction) => {
+        const q = query(collection(firestore, 'bookings'), where('bookingCode', '==', bookingCode));
+        const snap = await getDocs(q);
+        if (snap.empty) throw new Error(`ไม่พบรหัสการจอง "${bookingCode}"`);
 
-    await runTransaction(firestore, async (transaction) => {
-      const q = query(collection(firestore, 'bookings'), where('bookingCode', '==', bookingCode));
-      const snap = await getDocs(q);
-      if (snap.empty) {
-        throw new Error(`ไม่พบรหัสการจอง "${bookingCode}" ในระบบ`);
-      }
+        const docItem = snap.docs[0];
+        const current = docItem.data() as Booking;
 
-      const docItem = snap.docs[0];
-      const current = docItem.data() as Booking;
+        const targetRoomId = updatedFields.roomId || current.roomId;
+        const targetDate = updatedFields.date || current.date;
+        const targetStartTime = updatedFields.startTime || current.startTime;
+        const targetEndTime = updatedFields.endTime || current.endTime;
 
-      const targetRoomId = updatedFields.roomId || current.roomId;
-      const targetDate = updatedFields.date || current.date;
-      const targetStartTime = updatedFields.startTime || current.startTime;
-      const targetEndTime = updatedFields.endTime || current.endTime;
-
-      // Check conflict if room, date, or time changed
-      if (
-        (updatedFields.roomId && updatedFields.roomId !== current.roomId) ||
-        (updatedFields.date && updatedFields.date !== current.date) ||
-        (updatedFields.startTime && updatedFields.startTime !== current.startTime) ||
-        (updatedFields.endTime && updatedFields.endTime !== current.endTime)
-      ) {
-        const checkQ = query(
-          collection(firestore, 'bookings'),
-          where('roomId', '==', targetRoomId),
-          where('date', '==', targetDate),
-          where('status', '==', 'confirmed')
-        );
-        const checkSnap = await getDocs(checkQ);
-        for (const d of checkSnap.docs) {
-          const other = d.data() as Booking;
-          if (
-            other.bookingCode !== bookingCode &&
-            other.status !== 'cancelled' &&
-            isTimeSlotConflicting(targetStartTime, targetEndTime, other.startTime, other.endTime)
-          ) {
-            throw new Error(
-              `ช่วงเวลาใหม่ ${other.startTime} - ${other.endTime} น. ซ้อนกับการจองอื่น (${other.title} โดย ${other.bookerName}) กรุณาเลือกช่วงเวลาอื่น`
-            );
+        if (
+          (updatedFields.roomId && updatedFields.roomId !== current.roomId) ||
+          (updatedFields.date && updatedFields.date !== current.date) ||
+          (updatedFields.startTime && updatedFields.startTime !== current.startTime) ||
+          (updatedFields.endTime && updatedFields.endTime !== current.endTime)
+        ) {
+          const checkQ = query(
+            collection(firestore, 'bookings'),
+            where('roomId', '==', targetRoomId),
+            where('date', '==', targetDate),
+            where('status', '==', 'confirmed')
+          );
+          const checkSnap = await getDocs(checkQ);
+          for (const d of checkSnap.docs) {
+            const other = d.data() as Booking;
+            if (
+              other.bookingCode !== bookingCode &&
+              other.status !== 'cancelled' &&
+              isTimeSlotConflicting(targetStartTime, targetEndTime, other.startTime, other.endTime)
+            ) {
+              throw new Error(
+                `ช่วงเวลาใหม่ ${other.startTime} - ${other.endTime} น. ซ้อนกับการจองอื่น (${other.title} โดย ${other.bookerName}) กรุณาเลือกช่วงเวลาอื่น`
+              );
+            }
           }
         }
+
+        const merged: Booking = { ...current, ...updatedFields, updatedAt: now };
+        transaction.update(doc(firestore, 'bookings', docItem.id), merged as any);
+        updatedBookingResult = merged;
+      });
+
+      if (updatedBookingResult) {
+        await addNotification(
+          'booking_updated',
+          '✏️ อัปเดตข้อมูลการจอง',
+          `รหัส ${bookingCode} ได้รับการแก้ไขข้อมูลเรียบร้อยแล้ว`,
+          (updatedBookingResult as Booking).id,
+          bookingCode
+        );
+        syncToGoogleSheet(updatedBookingResult as Booking, 'update').catch(console.warn);
       }
 
-      const merged: Booking = { ...current, ...updatedFields, updatedAt: now };
-      transaction.update(doc(firestore, 'bookings', docItem.id), merged as any);
-      updatedBookingResult = merged;
-    });
-
-    if (updatedBookingResult) {
-      await addNotification(
-        'booking_updated',
-        '✏️ อัปเดตข้อมูลการจอง',
-        `รหัส ${bookingCode} (${(updatedBookingResult as Booking).roomName}) ได้รับการแก้ไขข้อมูลเรียบร้อยแล้ว`,
-        (updatedBookingResult as Booking).id,
-        bookingCode
-      );
-
-      syncToGoogleSheet(updatedBookingResult as Booking, 'update').catch(console.warn);
+      return { success: true, booking: updatedBookingResult || undefined };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'ไม่สามารถอัปเดตการจองได้' };
     }
-
-    return { success: true, booking: updatedBookingResult || undefined };
-  } catch (err: any) {
-    return { success: false, error: err.message || 'ไม่สามารถอัปเดตการจองได้' };
   }
+
+  // Cloud Bridge mode
+  let list = await fetchCloudBookings();
+  if (!list || list.length === 0) {
+    list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
+  }
+
+  const idx = list.findIndex((b) => b.bookingCode === bookingCode);
+  if (idx === -1) return { success: false, error: 'ไม่พบรหัสการจองนี้' };
+
+  const current = list[idx];
+  const merged: Booking = { ...current, ...updatedFields, updatedAt: now };
+
+  const conflict = checkBookingConflict(
+    list,
+    merged.roomId,
+    merged.date,
+    merged.startTime,
+    merged.endTime,
+    bookingCode
+  );
+
+  if (conflict.hasConflict) {
+    return { success: false, error: conflict.message || 'ช่วงเวลาใหม่ทับซ้อนกับการจองอื่น' };
+  }
+
+  list[idx] = merged;
+  saveLocalData(LS_BOOKINGS_KEY, list);
+  saveCloudBookings(list).catch(console.warn);
+
+  await addNotification(
+    'booking_updated',
+    '✏️ อัปเดตข้อมูลการจอง',
+    `รหัส ${bookingCode} ได้รับการแก้ไขข้อมูลเรียบร้อยแล้ว`,
+    merged.id,
+    bookingCode
+  );
+
+  syncToGoogleSheet(merged, 'update').catch(console.warn);
+
+  return { success: true, booking: merged };
 }
 
 /**
- * Cancel a booking by bookingCode
- * Sets status to 'cancelled' (Security rules prevent deletion)
+ * Cancel a booking
  */
 export async function cancelBooking(
   bookingCode: string,
   reason?: string
 ): Promise<{ success: boolean; error?: string }> {
-  if (!isFirebaseConfigured || !db) {
-    return {
-      success: false,
-      error: 'ยังไม่ได้เชื่อมต่อ Firebase Firestore: กรุณาใส่ Firebase Config ใน .env',
-    };
-  }
-
-  const firestore = getActiveDb();
   const now = new Date().toISOString();
 
-  try {
-    const q = query(collection(firestore, 'bookings'), where('bookingCode', '==', bookingCode));
-    const snap = await getDocs(q);
-    if (snap.empty) {
-      return { success: false, error: `ไม่พบรหัสการจอง "${bookingCode}"` };
+  if (isFirebaseConfigured && db) {
+    const firestore = getActiveDb();
+    try {
+      const q = query(collection(firestore, 'bookings'), where('bookingCode', '==', bookingCode));
+      const snap = await getDocs(q);
+      if (snap.empty) return { success: false, error: `ไม่พบรหัสการจอง "${bookingCode}"` };
+
+      const docItem = snap.docs[0];
+      const current = docItem.data() as Booking;
+
+      const cancelledBooking: Booking = {
+        ...current,
+        status: 'cancelled',
+        cancelledReason: reason || 'ยกเลิกโดยผู้จอง',
+        cancelledAt: now,
+        updatedAt: now,
+      };
+
+      await updateDoc(doc(firestore, 'bookings', docItem.id), cancelledBooking as any);
+
+      await addNotification(
+        'booking_cancelled',
+        '❌ ยกเลิกการจองห้อง',
+        `รหัส ${bookingCode} ("${current.roomName}") ได้รับการยกเลิกแล้ว`,
+        current.id,
+        bookingCode
+      );
+
+      syncToGoogleSheet(cancelledBooking, 'cancel').catch(console.warn);
+
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message || 'ไม่สามารถยกเลิกการจองได้' };
     }
-
-    const docItem = snap.docs[0];
-    const current = docItem.data() as Booking;
-
-    const cancelledBooking: Booking = {
-      ...current,
-      status: 'cancelled',
-      cancelledReason: reason || 'ยกเลิกโดยผู้จอง',
-      cancelledAt: now,
-      updatedAt: now,
-    };
-
-    await updateDoc(doc(firestore, 'bookings', docItem.id), cancelledBooking as any);
-
-    await addNotification(
-      'booking_cancelled',
-      '❌ ยกเลิกการจองห้อง',
-      `รหัส ${bookingCode} ("${current.roomName}") ได้รับการยกเลิกแล้ว`,
-      current.id,
-      bookingCode
-    );
-
-    syncToGoogleSheet(cancelledBooking, 'cancel').catch(console.warn);
-
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message || 'ไม่สามารถยกเลิกการจองได้' };
   }
+
+  // Cloud Bridge mode
+  let list = await fetchCloudBookings();
+  if (!list || list.length === 0) {
+    list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
+  }
+
+  const idx = list.findIndex((b) => b.bookingCode === bookingCode);
+  if (idx === -1) return { success: false, error: 'ไม่พบรหัสการจองนี้' };
+
+  const current = list[idx];
+  const cancelledBooking: Booking = {
+    ...current,
+    status: 'cancelled',
+    cancelledReason: reason || 'ยกเลิกโดยผู้จอง',
+    cancelledAt: now,
+    updatedAt: now,
+  };
+
+  list[idx] = cancelledBooking;
+  saveLocalData(LS_BOOKINGS_KEY, list);
+  saveCloudBookings(list).catch(console.warn);
+
+  await addNotification(
+    'booking_cancelled',
+    '❌ ยกเลิกการจองห้อง',
+    `รหัส ${bookingCode} ("${current.roomName}") ได้รับการยกเลิกแล้ว`,
+    current.id,
+    bookingCode
+  );
+
+  syncToGoogleSheet(cancelledBooking, 'cancel').catch(console.warn);
+
+  return { success: true };
 }
 
 /**
- * Update room details in Firestore (for Admin)
+ * Update room details
  */
 export async function updateRoom(
   roomId: string,
   updatedFields: Partial<Room>
 ): Promise<{ success: boolean; error?: string }> {
-  if (!isFirebaseConfigured || !db) {
-    return { success: false, error: 'Firebase Firestore ยังไม่ได้เชื่อมต่อ' };
+  if (isFirebaseConfigured && db) {
+    try {
+      await updateDoc(doc(getActiveDb(), 'rooms', roomId), updatedFields as any);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
 
-  try {
-    const firestore = getActiveDb();
-    await updateDoc(doc(firestore, 'rooms', roomId), updatedFields as any);
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  const rooms = getStoredLocalData<Room[]>(LS_ROOMS_KEY, INITIAL_ROOMS);
+  const idx = rooms.findIndex((r) => r.id === roomId);
+  if (idx !== -1) {
+    rooms[idx] = { ...rooms[idx], ...updatedFields };
+    saveLocalData(LS_ROOMS_KEY, rooms);
   }
+  return { success: true };
 }

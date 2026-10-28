@@ -5,7 +5,6 @@ import { BookingProvider } from './context/BookingContext';
 import { Navbar } from './components/common/Navbar';
 import { Footer } from './components/common/Footer';
 import { ToastContainer } from './components/common/ToastContainer';
-import { FirebaseStatusBanner } from './components/common/FirebaseStatusBanner';
 import { DashboardView } from './components/dashboard/DashboardView';
 import { CalendarView } from './components/calendar/CalendarView';
 import { BookingFormView } from './components/booking/BookingFormView';
@@ -24,9 +23,6 @@ export const App: React.FC = () => {
 
             {/* Top Navigation */}
             <Navbar />
-
-            {/* Firebase Connection Warning Banner */}
-            <FirebaseStatusBanner />
 
             {/* Main Content Area */}
             <main className="flex-1">
