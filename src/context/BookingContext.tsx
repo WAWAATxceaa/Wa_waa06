@@ -7,6 +7,7 @@ import {
   markNotificationAsRead,
   markAllNotificationsAsRead,
 } from '../services/firestoreService';
+import { isFirebaseConfigured } from '../config/firebase';
 import { getTodayString, getCurrentTimeString } from '../utils/dateUtils';
 
 interface ToastMessage {
@@ -22,6 +23,7 @@ interface BookingContextType {
   notifications: NotificationItem[];
   unreadNotificationCount: number;
   loading: boolean;
+  isFirebaseConnected: boolean;
   toasts: ToastMessage[];
   addToast: (type: ToastMessage['type'], title: string, message: string) => void;
   removeToast: (id: string) => void;
@@ -57,7 +59,7 @@ export const BookingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // Subscriptions
+  // Subscriptions exclusively via Firestore onSnapshot
   useEffect(() => {
     const unsubRooms = subscribeRooms((rooms) => {
       setRawRooms(rooms);
@@ -180,6 +182,7 @@ export const BookingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         notifications,
         unreadNotificationCount,
         loading,
+        isFirebaseConnected: isFirebaseConfigured,
         toasts,
         addToast,
         removeToast,

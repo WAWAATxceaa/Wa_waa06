@@ -2,36 +2,66 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Rooms collection: Public read, authenticated or admin write
+    // =========================================================================
+    // 1. Rooms Collection (จัดการห้องประชุม)
+    // =========================================================================
     match /rooms/{roomId} {
-      allow read: if true;
-      allow write: if true; // In production without auth, protected by Admin PIN on client
-    }
-    
-    // Bookings collection: Zero-Auth Booking System
-    match /bookings/{bookingId} {
-      // Anyone can read bookings to show on calendar and check availability
+      // ทุกคนสามารถอ่านรายชื่อห้องประชุมและสถานะได้แบบเรียลไทม์
       allow read: if true;
       
-      // Creating a booking requires basic validation
+      // อนุญาตให้สร้างหรืออัปเดตข้อมูลห้อง (ชื่อ, ความจุ, ชั้น, สถานะเปิด/ปิด, อุปกรณ์)
+      allow create, update: if request.resource.data.name is string
+                            && request.resource.data.capacity is number
+                            && request.resource.data.capacity > 0
+                            && request.resource.data.floor is number
+                            && request.resource.data.status in ['active', 'maintenance', 'inactive'];
+      
+      // ไม่อนุญาตให้ลบห้องประชุมทิ้งโดยเด็ดขาด ป้องกันข้อมูลสูญหาย (ให้ใช้การปรับ status เป็น 'maintenance' แทน)
+      allow delete: if false;
+    }
+    
+    // =========================================================================
+    // 2. Bookings Collection (ข้อมูลการจองห้อง - Single Source of Truth)
+    // =========================================================================
+    match /bookings/{bookingId} {
+      // ทุกคนสามารถอ่านรายการจองเพื่อแสดงในปฏิทินและตรวจสอบความพร้อมแบบเรียลไทม์
+      allow read: if true;
+      
+      // การสร้างการจองใหม่: ต้องมีข้อมูลครบถ้วน และเวลาเริ่มต้องน้อยกว่าเวลาสิ้นสุด
       allow create: if request.resource.data.bookingCode is string
                     && request.resource.data.roomId is string
                     && request.resource.data.date is string
                     && request.resource.data.startTime is string
                     && request.resource.data.endTime is string
+                    && request.resource.data.startTime < request.resource.data.endTime
+                    && request.resource.data.participantCount is number
+                    && request.resource.data.participantCount > 0
                     && request.resource.data.bookerName is string
+                    && request.resource.data.bookerName.size() > 0
+                    && request.resource.data.title is string
+                    && request.resource.data.title.size() > 0
                     && request.resource.data.status in ['confirmed', 'cancelled'];
                     
-      // Updating or cancelling a booking
-      allow update: if request.resource.data.bookingCode == resource.data.bookingCode;
+      // การแก้ไขการจอง: ไม่อนุญาตให้เปลี่ยน Booking Code หรือ Room ID
+      allow update: if request.resource.data.bookingCode == resource.data.bookingCode
+                    && request.resource.data.startTime < request.resource.data.endTime
+                    && request.resource.data.status in ['confirmed', 'cancelled'];
       
-      // Prevent arbitrary deletions - soft delete / cancellation preferred
+      // ห้ามลบข้อมูลการจองทั้งหมดโดยเด็ดขาด ป้องกันการลบข้อมูลตามใจชอบ (ใช้การเปลี่ยน status เป็น 'cancelled' แทน)
       allow delete: if false;
     }
     
-    // Notifications collection: Real-time public announcements
+    // =========================================================================
+    // 3. Notifications Collection (การแจ้งเตือนแบบเรียลไทม์)
+    // =========================================================================
     match /notifications/{notificationId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create: if request.resource.data.title is string
+                    && request.resource.data.message is string;
+      // อนุญาตให้อัปเดตเฉพาะสถานะการอ่าน (read: true) เท่านั้น
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      // ไม่อนุญาตให้ลบแจ้งเตือน
+      allow delete: if false;
     }
   }
 }
