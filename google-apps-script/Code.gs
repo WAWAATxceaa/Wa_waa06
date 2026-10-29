@@ -62,6 +62,14 @@ function doPost(e) {
       return createJsonResponse({ success: false, error: 'Unauthorized: Invalid Secret Token' }, 401);
     }
 
+    // รองรับคำขอ Ping / ทดสอบการเชื่อมต่อ
+    if (data.action === 'ping') {
+      return createJsonResponse({
+        success: true,
+        message: 'เชื่อมต่อ Google Apps Script Webhook สำเร็จพร้อมบันทึกข้อมูล! 🚀'
+      });
+    }
+
     // 2. ตรวจสอบข้อมูลบังคับและทำความสะอาด (Sanitization)
     const bookingCode = sanitizeText(data.bookingCode, 10);
     if (!bookingCode) {
