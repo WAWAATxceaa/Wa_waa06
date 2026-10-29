@@ -210,10 +210,10 @@ export const RoomsManagementView: React.FC = () => {
 
           <button
             onClick={() => setShowGuideModal(true)}
-            className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline flex items-center gap-1 self-start sm:self-auto"
+            className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1 self-start sm:self-auto bg-emerald-50 dark:bg-emerald-950/60 px-3 py-1.5 rounded-xl border border-emerald-200 dark:border-emerald-800"
           >
             <HelpCircle className="w-4 h-4" />
-            วิธีสร้าง Apps Script (3 ขั้นตอน)
+            วิธีติดตั้ง & กดยืนยันสิทธิ์อนุญาตเข้าถึงไฟล์
           </button>
         </div>
 
@@ -227,7 +227,7 @@ export const RoomsManagementView: React.FC = () => {
               onChange={(e) => setSheetWebhookUrl(e.target.value)}
               className="flex-1 px-4 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-xs sm:text-sm outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
             />
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 disabled={testingSheet || !sheetWebhookUrl.trim()}
@@ -244,6 +244,22 @@ export const RoomsManagementView: React.FC = () => {
               </button>
             </div>
           </div>
+
+          {sheetWebhookUrl.trim() && (
+            <div className="pt-1 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const shareUrl = `${window.location.origin}${window.location.pathname}#/?sheet=${encodeURIComponent(sheetWebhookUrl.trim())}`;
+                  navigator.clipboard.writeText(shareUrl);
+                  addToast('success', 'คัดลอกลิงก์สำเร็จ 📱', 'ส่งลิงก์นี้ไปเปิดบนมือถือเพื่อเชื่อมต่อและซิงค์ข้อมูลเรียลไทม์ทันที!');
+                }}
+                className="text-xs px-3.5 py-1.5 rounded-xl bg-violet-50 text-violet-700 dark:bg-violet-950/50 dark:text-violet-300 border border-violet-200 dark:border-violet-800 font-semibold hover:bg-violet-100 flex items-center gap-1.5"
+              >
+                📱 คัดลอกลิงก์แชร์สำหรับเปิดบนมือถือ (ให้มือถือซิงค์อัตโนมัติ)
+              </button>
+            </div>
+          )}
 
           {sheetTestResult && (
             <div
@@ -380,10 +396,22 @@ export const RoomsManagementView: React.FC = () => {
               <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
                 <strong>3. Deploy เป็น Web App:</strong>
                 <p className="mt-1 text-xs text-slate-500">
-                  คลิก <strong>ทำให้ใช้งานได้ (Deploy)</strong> &gt; <strong>การจัดการทำให้ใช้งานได้ใหม่ (New deployment)</strong> &gt; เลือกประเภท <strong>เว็บแอป (Web app)</strong>
-                  <br />• ดำเนินการในฐานะ: <strong>ฉัน (Me)</strong>
-                  <br />• ผู้ที่มีสิทธิ์เข้าถึง: <strong className="text-pink-600">ทุกคน (Anyone)</strong> *(สำคัญมาก)*
-                  <br />จากนั้นคัดลอก URL ที่ลงท้ายด้วย <code>/exec</code> มาวางในช่องด้านบนได้เลย!
+                  คลิกปุ่มสีน้ำเงิน <strong>การทำให้ใช้งานได้ (Deploy)</strong> &gt; <strong>การทำให้ใช้งานได้รายการใหม่ (New deployment)</strong> &gt; เลือกประเภทรูปฟันเฟืองเป็น <strong>เว็บแอป (Web app)</strong>
+                  <br />• เรียกใช้ในฐานะ (Execute as): <strong>ฉัน (Me - บัญชีของคุณ)</strong>
+                  <br />• ผู้ที่มีสิทธิ์เข้าถึง (Who has access): <strong className="text-pink-600 bg-pink-50 dark:bg-pink-950/40 px-1 py-0.5 rounded">ทุกคน (Anyone)</strong> ⚠️ <em>(จำเป็นต้องเลือก Anyone ไม่งั้นหน้าเว็บจะส่งข้อมูลเข้าไม่ได้)</em>
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60">
+                <strong className="text-amber-800 dark:text-amber-300">4. กดยืนยันสิทธิ์อนุญาตเข้าถึงไฟล์ (สำคัญมาก!):</strong>
+                <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+                  เมื่อกด Deploy จะมีหน้าต่างขึ้นมาขอสิทธิ์ ให้ทำตามนี้:
+                  <br />1. กดปุ่ม <strong>"ให้สิทธิ์" (Authorize access)</strong> แล้วเลือกบัญชี Google ของคุณ
+                  <br />2. จะเจอหน้าเตือน <em>"Google ไม่ได้ยืนยันแอปนี้" (Google hasn't verified this app)</em>
+                  <br />3. ให้กดคลิกลิงก์คำว่า <strong>"ขั้นสูง" (Advanced)</strong> ที่มุมซ้ายล่าง
+                  <br />4. คลิก <strong>"ไปยัง ... (ไม่ปลอดภัย)" (Go to ... unsafe)</strong>
+                  <br />5. เลื่อนลงล่างสุดแล้วกด <strong>"อนุญาต" (Allow)</strong>
+                  <br />6. คัดลอก URL เว็บแอป (ที่ลงท้ายด้วย <code>/exec</code>) มาวางในช่องด้านบนได้เลย!
                 </p>
               </div>
             </div>

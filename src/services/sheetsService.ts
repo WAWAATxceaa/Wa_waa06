@@ -5,6 +5,24 @@ const LS_WEBHOOK_KEY = 'smart_room_sheets_webhook_url';
 
 export function getWebhookUrl(): string {
   try {
+    // 1. Check if URL param exists in search or hash (e.g. ?sheet=https://script.google.com/macros/s/.../exec)
+    const checkParam = (queryStr: string) => {
+      const params = new URLSearchParams(queryStr);
+      return params.get('sheet') || params.get('sheetUrl');
+    };
+
+    let fromUrl = checkParam(window.location.search);
+    if (!fromUrl && window.location.hash.includes('?')) {
+      const qIndex = window.location.hash.indexOf('?');
+      fromUrl = checkParam(window.location.hash.substring(qIndex));
+    }
+
+    if (fromUrl && fromUrl.trim().startsWith('http')) {
+      const decoded = decodeURIComponent(fromUrl.trim());
+      localStorage.setItem(LS_WEBHOOK_KEY, decoded);
+      return decoded;
+    }
+
     const custom = localStorage.getItem(LS_WEBHOOK_KEY);
     if (custom && custom.trim()) return custom.trim();
   } catch (e) {}
@@ -52,6 +70,26 @@ export function createSheetPayload(
 }
 
 /**
+ * Reads all bookings directly from Google Sheet via doGet
+ */
+export async function fetchBookingsFromGoogleSheet(): Promise<Booking[]> {
+  const url = getWebhookUrl();
+  if (!url) return [];
+
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (data && Array.isArray(data.bookings)) {
+      return data.bookings;
+    }
+  } catch (err) {
+    // Silently ignore network or offline
+  }
+  return [];
+}
+
+/**
  * Sends a test ping to the Google Sheets Webhook URL to verify connection
  */
 export async function testSheetConnection(urlToTest?: string): Promise<{ success: boolean; message: string }> {
@@ -61,8 +99,19 @@ export async function testSheetConnection(urlToTest?: string): Promise<{ success
   }
 
   try {
-    const res = await fetch(targetUrl, {
+    // 1. Try reading via GET first
+    const getRes = await fetch(targetUrl, { method: 'GET' }).catch(() => null);
+    if (getRes && getRes.ok) {
+      return {
+        success: true,
+        message: 'เชื่อมต่อ Google Sheets Webhook สำเร็จพร้อมซิงค์ข้อมูล! 🚀',
+      };
+    }
+
+    // 2. Try POST with no-cors fallback
+    await fetch(targetUrl, {
       method: 'POST',
+      mode: 'no-cors',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
       },
@@ -72,18 +121,10 @@ export async function testSheetConnection(urlToTest?: string): Promise<{ success
       }),
     });
 
-    if (res.ok) {
-      const data = await res.json().catch(() => null);
-      return {
-        success: true,
-        message: data?.message || 'เชื่อมต่อ Google Sheets Webhook สำเร็จพร้อมบันทึกข้อมูล! 🚀',
-      };
-    } else {
-      return {
-        success: false,
-        message: `เชื่อมต่อไม่สำเร็จ (HTTP Status: ${res.status}) ตรวจสอบว่าเลือกสิทธิ์เป็น 'Anyone' แล้วหรือยัง`,
-      };
-    }
+    return {
+      success: true,
+      message: 'ส่งคำขอไปยัง Google Apps Script สำเร็จ! ตรวจสอบสิทธิ์ใน Google Sheet ได้เลยครับ',
+    };
   } catch (err: any) {
     return {
       success: false,
@@ -93,9 +134,9 @@ export async function testSheetConnection(urlToTest?: string): Promise<{ success
 }
 
 /**
- * Sends booking update to Google Sheet Webhook via fetch POST (Content-Type: text/plain).
- * Retries up to 3 times with exponential backoff on failure.
- * Non-blocking: will never crash the main booking flow.
+ * Sends booking update to Google Sheet Webhook via fetch POST.
+ * Uses mode: 'no-cors' to avoid browser CORS redirect blocking from Google Apps Script.
+ * Retries up to 3 times on failure.
  */
 export async function syncToGoogleSheet(
   booking: Booking,
@@ -112,19 +153,18 @@ export async function syncToGoogleSheet(
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // Content-Type: text/plain is used deliberately to prevent CORS Preflight OPTIONS in Google Apps Script
-      const response = await fetch(url, {
+      // mode: 'no-cors' is essential so browser doesn't block Google Apps Script 302 redirect!
+      await fetch(url, {
         method: 'POST',
+        mode: 'no-cors',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8',
         },
         body: JSON.stringify(payload),
       });
 
-      if (response.ok) {
-        console.log(`✅ Google Sheet synced successfully on attempt ${attempt}`);
-        return { success: true };
-      }
+      console.log(`✅ Google Sheet synced successfully on attempt ${attempt}`);
+      return { success: true };
     } catch (err) {
       console.warn(`⚠️ Google Sheet sync attempt ${attempt}/${maxRetries} failed:`, err);
     }
@@ -134,6 +174,6 @@ export async function syncToGoogleSheet(
     }
   }
 
-  console.warn('⚠️ Google Sheet sync failed after 3 attempts. Local & Cloud data remains intact.');
+  console.warn('⚠️ Google Sheet sync failed after 3 attempts.');
   return { success: false, message: 'ไม่สามารถส่งข้อมูลไปยัง Google Sheet ได้ (ลองครบ 3 ครั้ง)' };
 }

@@ -54,9 +54,6 @@ export const Navbar: React.FC = () => {
               <span className="font-display font-bold text-lg sm:text-xl bg-gradient-to-r from-violet-600 via-pink-500 to-cyan-400 bg-clip-text text-transparent">
                 SmartRoom ✨
               </span>
-              <span className="hidden sm:inline-block ml-2 text-xs font-medium px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300">
-                Gen Z Ready
-              </span>
             </div>
           </NavLink>
 

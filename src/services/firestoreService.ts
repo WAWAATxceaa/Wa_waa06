@@ -14,13 +14,11 @@ import { db, isFirebaseConfigured } from '../config/firebase';
 import { Booking, Room, NotificationItem } from '../types';
 import { INITIAL_ROOMS } from '../config/constants';
 import { isTimeSlotConflicting } from '../utils/dateUtils';
-import { syncToGoogleSheet } from './sheetsService';
+import { syncToGoogleSheet, fetchBookingsFromGoogleSheet, getWebhookUrl } from './sheetsService';
 
-// Cloud Sync Bridge Endpoint (for instant real-time sync across devices without manual setup)
-const CLOUD_BRIDGE_URL = 'https://api.restful-api.dev/objects/ff808181a09d98f701a18300f0583907';
-const LS_BOOKINGS_KEY = 'smart_meeting_bookings_v2';
-const LS_ROOMS_KEY = 'smart_meeting_rooms_v2';
-const LS_NOTIFICATIONS_KEY = 'smart_meeting_notifications_v2';
+const LS_BOOKINGS_KEY = 'smart_meeting_bookings_v3';
+const LS_ROOMS_KEY = 'smart_meeting_rooms_v3';
+const LS_NOTIFICATIONS_KEY = 'smart_meeting_notifications_v3';
 
 const localEventBus = new EventTarget();
 
@@ -41,35 +39,6 @@ function saveLocalData<T>(key: string, data: T): void {
     localEventBus.dispatchEvent(new CustomEvent('datachange', { detail: { key } }));
   } catch (e) {
     console.error('LocalStorage write failed:', e);
-  }
-}
-
-// Fetch shared cloud bookings across different devices
-async function fetchCloudBookings(): Promise<Booking[]> {
-  try {
-    const res = await fetch(CLOUD_BRIDGE_URL);
-    if (!res.ok) return [];
-    const json = await res.json();
-    return json?.data?.bookings || [];
-  } catch (err) {
-    return [];
-  }
-}
-
-// Save shared cloud bookings across different devices
-async function saveCloudBookings(bookings: Booking[]): Promise<boolean> {
-  try {
-    const res = await fetch(CLOUD_BRIDGE_URL, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'SmartMeetingRoom_v1',
-        data: { bookings },
-      }),
-    });
-    return res.ok;
-  } catch (err) {
-    return false;
   }
 }
 
@@ -120,7 +89,6 @@ export function subscribeRooms(callback: (rooms: Room[]) => void): () => void {
     );
   }
 
-  // Local & fallback
   const emit = () => {
     const rooms = getStoredLocalData<Room[]>(LS_ROOMS_KEY, INITIAL_ROOMS);
     callback(rooms.sort((a, b) => (a.order || 0) - (b.order || 0)));
@@ -139,7 +107,7 @@ export function subscribeRooms(callback: (rooms: Room[]) => void): () => void {
 
 /**
  * Real-time listener for Bookings
- * Works on Firebase Firestore onSnapshot, OR Cloud Bridge real-time polling across devices!
+ * Supports Firebase Firestore onSnapshot, OR Google Sheets real-time polling sync!
  */
 export function subscribeBookings(callback: (bookings: Booking[]) => void): () => void {
   if (isFirebaseConfigured && db) {
@@ -158,23 +126,48 @@ export function subscribeBookings(callback: (bookings: Booking[]) => void): () =
     );
   }
 
-  // Cloud Bridge Mode: Emit local cache immediately, then poll cloud store every 3s
+  // 1. Emit local cache immediately
   const emitLocal = () => {
     const local = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
     callback(local);
   };
   emitLocal();
 
-  const syncFromCloud = async () => {
-    const cloud = await fetchCloudBookings();
-    if (cloud && cloud.length > 0) {
-      saveLocalData(LS_BOOKINGS_KEY, cloud);
-      callback(cloud);
+  // 2. Poll Google Sheet for live updates across devices
+  const syncFromGoogleSheet = async () => {
+    if (!getWebhookUrl()) return;
+    const sheetBookings = await fetchBookingsFromGoogleSheet();
+    if (sheetBookings && sheetBookings.length > 0) {
+      // Merge with any local bookings
+      const local = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
+      const mergedMap = new Map<string, Booking>();
+      local.forEach((b) => mergedMap.set(b.bookingCode, b));
+      sheetBookings.forEach((b) => {
+        if (!b.bookingCode) return;
+        if (!b.roomId) {
+          const foundRoom = INITIAL_ROOMS.find((r) => r.name === b.roomName) || INITIAL_ROOMS[0];
+          b.roomId = foundRoom.id;
+        }
+        if (!b.roomColor) {
+          const foundRoom = INITIAL_ROOMS.find((r) => r.id === b.roomId);
+          b.roomColor = foundRoom?.color || '#8B5CF6';
+        }
+        if (!b.startDateTime && b.date && b.startTime) {
+          b.startDateTime = `${b.date}T${b.startTime}:00`;
+        }
+        if (!b.endDateTime && b.date && b.endTime) {
+          b.endDateTime = `${b.date}T${b.endTime}:00`;
+        }
+        mergedMap.set(b.bookingCode, b);
+      });
+      const merged = Array.from(mergedMap.values());
+      saveLocalData(LS_BOOKINGS_KEY, merged);
+      callback(merged);
     }
   };
 
-  syncFromCloud();
-  const pollInterval = setInterval(syncFromCloud, 3000); // 3-second real-time cross-device polling
+  syncFromGoogleSheet();
+  const pollInterval = setInterval(syncFromGoogleSheet, 4000); // Poll Google Sheet every 4s for cross-device real-time sync
 
   const listener = () => emitLocal();
   localEventBus.addEventListener('datachange', listener);
@@ -320,8 +313,8 @@ export function checkBookingConflict(
 /**
  * Create a new booking
  * 1. Checks conflict inside transaction
- * 2. Saves atomically to Firebase Firestore or Cloud Bridge
- * 3. Syncs across all devices in real-time
+ * 2. Saves to Firebase Firestore or Google Sheets
+ * 3. Syncs across all devices
  */
 export async function createBooking(
   bookingData: Omit<Booking, 'id' | 'createdAt' | 'updatedAt' | 'status'>
@@ -377,18 +370,14 @@ export async function createBooking(
       );
 
       syncToGoogleSheet(newBooking, 'create').catch(console.warn);
-
       return { success: true, booking: newBooking };
     } catch (err: any) {
       return { success: false, error: err.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' };
     }
   }
 
-  // 2. Cloud Bridge Real-Time Mode (Works across devices without requiring Firebase setup!)
-  let currentBookings = await fetchCloudBookings();
-  if (!currentBookings || currentBookings.length === 0) {
-    currentBookings = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
-  }
+  // 2. Google Sheets / Local Real-Time Sync Mode
+  let currentBookings = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
 
   // Check conflict: Same room, same date, start < otherEnd && end > otherStart, not cancelled
   const conflict = checkBookingConflict(
@@ -404,10 +393,10 @@ export async function createBooking(
   }
 
   currentBookings.push(newBooking);
-
-  // Save to both Cloud Bridge and Local Cache
   saveLocalData(LS_BOOKINGS_KEY, currentBookings);
-  saveCloudBookings(currentBookings).catch(console.warn);
+
+  // Sync to Google Sheet immediately via no-cors
+  syncToGoogleSheet(newBooking, 'create').catch(console.warn);
 
   await addNotification(
     'new_booking',
@@ -416,8 +405,6 @@ export async function createBooking(
     newBooking.id,
     newBooking.bookingCode
   );
-
-  syncToGoogleSheet(newBooking, 'create').catch(console.warn);
 
   return { success: true, booking: newBooking };
 }
@@ -497,12 +484,8 @@ export async function updateBooking(
     }
   }
 
-  // Cloud Bridge mode
-  let list = await fetchCloudBookings();
-  if (!list || list.length === 0) {
-    list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
-  }
-
+  // Google Sheets / Local mode
+  let list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
   const idx = list.findIndex((b) => b.bookingCode === bookingCode);
   if (idx === -1) return { success: false, error: 'ไม่พบรหัสการจองนี้' };
 
@@ -524,7 +507,7 @@ export async function updateBooking(
 
   list[idx] = merged;
   saveLocalData(LS_BOOKINGS_KEY, list);
-  saveCloudBookings(list).catch(console.warn);
+  syncToGoogleSheet(merged, 'update').catch(console.warn);
 
   await addNotification(
     'booking_updated',
@@ -533,8 +516,6 @@ export async function updateBooking(
     merged.id,
     bookingCode
   );
-
-  syncToGoogleSheet(merged, 'update').catch(console.warn);
 
   return { success: true, booking: merged };
 }
@@ -577,19 +558,14 @@ export async function cancelBooking(
       );
 
       syncToGoogleSheet(cancelledBooking, 'cancel').catch(console.warn);
-
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message || 'ไม่สามารถยกเลิกการจองได้' };
     }
   }
 
-  // Cloud Bridge mode
-  let list = await fetchCloudBookings();
-  if (!list || list.length === 0) {
-    list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
-  }
-
+  // Google Sheets / Local mode
+  let list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
   const idx = list.findIndex((b) => b.bookingCode === bookingCode);
   if (idx === -1) return { success: false, error: 'ไม่พบรหัสการจองนี้' };
 
@@ -604,7 +580,7 @@ export async function cancelBooking(
 
   list[idx] = cancelledBooking;
   saveLocalData(LS_BOOKINGS_KEY, list);
-  saveCloudBookings(list).catch(console.warn);
+  syncToGoogleSheet(cancelledBooking, 'cancel').catch(console.warn);
 
   await addNotification(
     'booking_cancelled',
@@ -613,8 +589,6 @@ export async function cancelBooking(
     current.id,
     bookingCode
   );
-
-  syncToGoogleSheet(cancelledBooking, 'cancel').catch(console.warn);
 
   return { success: true };
 }
