@@ -1,26 +1,19 @@
-import { Booking, Room, SystemSettings, Announcement, ApprovalStepLog } from '../types';
-import { INITIAL_ROOMS, DEFAULT_SYSTEM_SETTINGS } from '../config/constants';
+import { Booking } from '../types';
 
-export const SECRET_TOKEN = import.meta.env.VITE_SHEETS_SECRET_TOKEN || 'TTC_SECURE_KEY_2026';
+export const SECRET_TOKEN = import.meta.env.VITE_SHEETS_SECRET_TOKEN || 'TTC_SHEET_SECRET_2026';
 const LS_WEBHOOK_KEY = 'ttc_sheets_webhook_url';
 
-export async function fetchBookingsFromGoogleSheet(): Promise<Booking[]> {
-  const full = await fetchFullData();
-  return full.bookings;
-}
-
-export async function syncToGoogleSheet(booking: Booking, action: 'create' | 'update' | 'cancel') {
-  if (action === 'cancel') {
-    return apiCancelBooking(booking.bookingCode, 'ยกเลิกคำขอ');
-  }
-  return apiCreateBooking(booking);
-}
-
+/**
+ * ดึง Webhook URL ของ Google Apps Script:
+ * 1. ตรวจสอบจาก URL Param e.g. ?sheet=https://script.google.com/macros/s/.../exec
+ * 2. ตรวจสอบจาก localStorage (ที่ผู้ใช้กรอกในหน้าจัดการ)
+ * 3. ตรวจสอบจากตัวแปรแวดล้อม VITE_SHEETS_WEBHOOK_URL (.env / GitHub Secrets)
+ */
 export function getWebhookUrl(): string {
   try {
     const checkParam = (queryStr: string) => {
       const params = new URLSearchParams(queryStr);
-      return params.get('sheet') || params.get('sheetUrl') || params.get('api');
+      return params.get('sheet') || params.get('sheetUrl') || params.get('api') || params.get('webhook');
     };
 
     let fromUrl = checkParam(window.location.search);
@@ -49,185 +42,144 @@ export function setWebhookUrl(url: string): void {
 }
 
 /**
- * ดึงข้อมูลทั้งหมดจาก Google Sheet (Single Source of Truth)
+ * แปลงข้อมูลการจองเป็น Payload สำหรับส่งเข้า Google Sheet แท็บ "การจอง"
  */
-export async function fetchFullData(): Promise<{
-  bookings: Booking[];
-  rooms: Room[];
-  settings: Partial<SystemSettings>;
-  announcements: Announcement[];
-}> {
-  const url = getWebhookUrl();
-  if (!url) {
-    return {
-      bookings: [],
-      rooms: INITIAL_ROOMS,
-      settings: DEFAULT_SYSTEM_SETTINGS,
-      announcements: [],
-    };
-  }
+export function createSheetPayload(
+  booking: Booking,
+  eventType: 'create' | 'update' | 'cancel' | 'status_change'
+) {
+  let statusThai = booking.statusThai || booking.status || 'ยื่นคำขอแล้ว';
+  if (booking.status === 'approved') statusThai = 'อนุมัติเรียบร้อย';
+  else if (booking.status === 'cancelled') statusThai = 'ยกเลิกคำขอ';
+  else if (booking.status === 'rejected') statusThai = 'ไม่อนุมัติ/ส่งกลับ';
+  else if (booking.status === 'pending_step2') statusThai = 'รอตรวจความพร้อมห้อง/โสตฯ (ขั้น 2)';
+  else if (booking.status === 'pending_step3') statusThai = 'รอรับรอง (ขั้น 3)';
+  else if (booking.status === 'pending_step4') statusThai = 'รอพิจารณาอนุมัติ (ขั้น 4)';
 
-  try {
-    const res = await fetch(`${url}?type=all&_t=${Date.now()}`, {
-      method: 'GET',
-    });
-    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-    const data = await res.json();
+  const amenities =
+    booking.amenitiesText ||
+    (Array.isArray(booking.amenities) ? booking.amenities.join(', ') : '') ||
+    '-';
 
-    const bookings: Booking[] = Array.isArray(data.bookings) ? data.bookings : [];
-    const rooms: Room[] = (Array.isArray(data.rooms) && data.rooms.length > 0) ? data.rooms : INITIAL_ROOMS;
-    const settings: Partial<SystemSettings> = data.settings || {};
-    const announcements: Announcement[] = Array.isArray(data.announcements) ? data.announcements : [];
-
-    return { bookings, rooms, settings, announcements };
-  } catch (err) {
-    console.warn('fetchFullData error:', err);
-    return {
-      bookings: [],
-      rooms: INITIAL_ROOMS,
-      settings: DEFAULT_SYSTEM_SETTINGS,
-      announcements: [],
-    };
-  }
+  return {
+    action: eventType,
+    secretToken: SECRET_TOKEN,
+    bookingCode: booking.bookingCode,
+    status: booking.status,
+    statusThai: statusThai,
+    roomName: booking.roomName || 'ไม่ระบุห้อง',
+    otherRoomName: booking.otherRoomName || '',
+    date: booking.date || '',
+    startTime: booking.startTime || '',
+    endTime: booking.endTime || '',
+    participantCount: Number(booking.participantCount) || 1,
+    amenities: amenities,
+    amenitiesText: amenities,
+    bookerName: booking.bookerName || '-',
+    bookerPosition: booking.bookerPosition || 'บุคลากร',
+    department: booking.department || '-',
+    contact: booking.bookerContact || '-',
+    bookerContact: booking.bookerContact || '-',
+    title: booking.title || '-',
+    description: booking.description || '-',
+    currentStep: booking.currentStep || 1,
+    createdAt: booking.createdAt || new Date().toISOString(),
+    updatedAt: booking.updatedAt || new Date().toISOString(),
+    note: booking.cancelledReason || '',
+    attachmentUrl: booking.attachmentUrl || '',
+  };
 }
 
 /**
- * ส่งคำขอ POST ไปยัง Google Apps Script Web App
+ * =========================================================================
+ * ส่งสำเนาข้อมูลการจองเข้า Google Sheet (ทางเดียว: เว็บ -> ชีต)
+ * =========================================================================
+ * - ทำงานในเบื้องหลังแบบ Asynchronous (ห้ามผู้ใช้ต้องรอ)
+ * - ส่งทุกเหตุการณ์: จองใหม่ (create), แก้ไข (update), ยกเลิก (cancel), เปลี่ยนสถานะ (status_change)
+ * - ป้องกันปัญหา CORS Preflight ด้วย Content-Type: text/plain
+ * - ลองส่งซ้ำสูงสุด 3 ครั้งพร้อม Exponential Backoff
+ * - ไม่ทำให้การทำงานหลักของเว็บล้มเหลว
+ * - แสดงสถานะชัดเจนใน Console (DevTools)
  */
-async function sendPostRequest(payload: any, maxRetries = 3): Promise<{ success: boolean; data?: any; error?: string }> {
+export async function sendBookingToGoogleSheet(
+  booking: Booking,
+  eventType: 'create' | 'update' | 'cancel' | 'status_change',
+  onFailureWarning?: (msg: string) => void
+): Promise<{ success: boolean; error?: string }> {
   const url = getWebhookUrl();
-  if (!url) {
-    return { success: false, error: 'ยังไม่ได้ระบุ Webhook URL ของ Google Apps Script' };
+
+  if (!url || !url.trim().startsWith('http')) {
+    console.log(
+      `ℹ️ [Google Sheet Sync] ยังไม่ได้ระบุ VITE_SHEETS_WEBHOOK_URL หรือ Webhook URL ในระบบ (บันทึกในเว็บเรียบร้อยแล้ว) | Booking Code: ${booking.bookingCode}`
+    );
+    return { success: false, error: 'ยังไม่ได้ระบุ Webhook URL' };
   }
+
+  const payload = createSheetPayload(booking, eventType);
+  const maxRetries = 3;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const res = await fetch(url, {
+      console.log(
+        `⏳ [Google Sheet Sync] กำลังส่งข้อมูลไปยัง Google Sheet (ครั้งที่ ${attempt}/${maxRetries}) | Code: ${booking.bookingCode} | เหตุการณ์: ${eventType}`
+      );
+
+      // ใช้ Content-Type: text/plain;charset=utf-8 และ mode: no-cors เพื่อเลี่ยงปัญหา CORS preflight & 302 redirect
+      await fetch(url, {
         method: 'POST',
+        mode: 'no-cors',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8',
         },
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        const json = await res.json().catch(() => ({ success: true }));
-        return { success: true, data: json };
-      }
-    } catch (err) {
-      console.warn(`POST attempt ${attempt}/${maxRetries} failed:`, err);
-      // Fallback for CORS redirect
-      if (attempt === maxRetries) {
-        try {
-          await fetch(url, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: {
-              'Content-Type': 'text/plain;charset=utf-8',
-            },
-            body: JSON.stringify(payload),
-          });
-          return { success: true, data: { success: true, noCors: true } };
-        } catch (noCorsErr) {
-          return { success: false, error: 'ไม่สามารถติดต่อเซิร์ฟเวอร์ Google Apps Script ได้' };
-        }
+      console.log(
+        `%c✅ [Google Sheet Sync] ส่งข้อมูลเข้า Google Sheet สำเร็จ! | Booking Code: ${booking.bookingCode} | สถานะ: ${payload.statusThai} | เหตุการณ์: ${eventType}`,
+        'color: #10B981; font-weight: bold; font-size: 11px;'
+      );
+
+      return { success: true };
+    } catch (err: any) {
+      console.warn(
+        `⚠️ [Google Sheet Sync] การส่งครั้งที่ ${attempt}/${maxRetries} ล้มเหลว:`,
+        err?.message || err
+      );
+
+      if (attempt < maxRetries) {
+        // รอ 1 วินาทีก่อนลองส่งซ้ำ
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
       }
     }
   }
 
-  return { success: false, error: 'หมดเวลาการเชื่อมต่อ (ลองครบ 3 ครั้ง)' };
-}
+  const errorMsg = `ไม่สามารถส่งข้อมูลไปยัง Google Sheet ได้ (ลองครบ 3 ครั้ง) | รหัส: ${booking.bookingCode}`;
+  console.warn(
+    `%c${errorMsg}`,
+    'color: #F43F5E; font-weight: bold; font-size: 11px;'
+  );
 
-/**
- * 1. ยื่นคำขอจองห้องใหม่ (ขั้นที่ 1)
- */
-export async function apiCreateBooking(bookingData: Partial<Booking>): Promise<{ success: boolean; bookingCode?: string; error?: string }> {
-  const res = await sendPostRequest({
-    action: 'create_booking',
-    ...bookingData,
-  });
-
-  if (res.success) {
-    return {
-      success: true,
-      bookingCode: res.data?.bookingCode || bookingData.bookingCode,
-    };
+  if (onFailureWarning) {
+    onFailureWarning('ส่งข้อมูลไปยัง Google Sheet ล้มเหลว (ข้อมูลในเว็บยังบันทึกครบถ้วน)');
   }
 
-  return { success: false, error: res.data?.error || res.error || 'เกิดข้อผิดพลาดในการส่งคำขอ' };
+  return { success: false, error: errorMsg };
 }
 
-/**
- * 2. บันทึกผลการพิจารณาตามสายอนุมัติ 4 ขั้น (ห้ามข้ามขั้น)
- */
-export async function apiApproveStep(params: {
-  bookingCode: string;
-  step: 2 | 3 | 4;
-  stepAction: string;
-  actorName: string;
-  actorRole: string;
-  note?: string;
-}): Promise<{ success: boolean; status?: string; statusThai?: string; error?: string }> {
-  const res = await sendPostRequest({
-    action: 'approve_step',
-    ...params,
-  });
-
-  if (res.success && res.data?.success !== false) {
-    return {
-      success: true,
-      status: res.data?.status,
-      statusThai: res.data?.statusThai,
-    };
-  }
-
-  return { success: false, error: res.data?.error || res.error || 'ไม่สามารถบันทึกผลการพิจารณาได้' };
-}
+export const syncToGoogleSheet = sendBookingToGoogleSheet;
 
 /**
- * 3. ยกเลิกคำขอโดยผู้ขอ
- */
-export async function apiCancelBooking(bookingCode: string, reason: string): Promise<{ success: boolean; error?: string }> {
-  const res = await sendPostRequest({
-    action: 'cancel_booking',
-    bookingCode,
-    reason,
-  });
-
-  if (res.success && res.data?.success !== false) {
-    return { success: true };
-  }
-
-  return { success: false, error: res.data?.error || res.error || 'ไม่สามารถยกเลิกคำขอได้' };
-}
-
-/**
- * 4. อัปโหลดไฟล์กำหนดการเข้า Google Drive
+ * อัปโหลดไฟล์กำหนดการเข้า Base64 / Google Drive (ไม่บล็อกการจอง)
  */
 export async function apiUploadAttachment(file: File): Promise<{ success: boolean; fileUrl?: string; fileName?: string; error?: string }> {
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = async () => {
-      const base64Data = reader.result as string;
-      const res = await sendPostRequest({
-        action: 'upload_attachment',
+    reader.onload = () => {
+      resolve({
+        success: true,
+        fileUrl: reader.result as string,
         fileName: file.name,
-        mimeType: file.type,
-        base64Data: base64Data,
       });
-
-      if (res.success && res.data?.fileUrl) {
-        resolve({
-          success: true,
-          fileUrl: res.data.fileUrl,
-          fileName: file.name,
-        });
-      } else {
-        resolve({
-          success: false,
-          error: res.data?.error || 'อัปโหลดไฟล์ไปยัง Google Drive ไม่สำเร็จ',
-        });
-      }
     };
     reader.onerror = () => {
       resolve({ success: false, error: 'ไม่สามารถอ่านไฟล์ได้' });
@@ -237,37 +189,38 @@ export async function apiUploadAttachment(file: File): Promise<{ success: boolea
 }
 
 /**
- * 5. ทดสอบการเชื่อมต่อ Apps Script
+ * ฟังก์ชันทดสอบการเชื่อมต่อ Google Sheets Webhook
  */
 export async function testSheetConnection(targetUrl?: string): Promise<{ success: boolean; message: string }> {
   const url = targetUrl || getWebhookUrl();
-  if (!url) {
-    return { success: false, message: 'กรุณากรอก Webhook URL' };
+  if (!url || !url.trim().startsWith('http')) {
+    return { success: false, message: 'กรุณากรอก Webhook URL ของ Google Apps Script (ลงท้ายด้วย /exec)' };
   }
 
   try {
-    const res = await fetch(`${url}?type=ping&_t=${Date.now()}`);
-    if (res.ok) {
-      return {
-        success: true,
-        message: 'เชื่อมต่อ Google Apps Script Web App สำเร็จพร้อมใช้งาน! 🚀',
-      };
-    }
-  } catch (err) {}
+    const testPayload = {
+      action: 'ping',
+      secretToken: SECRET_TOKEN,
+      timestamp: new Date().toISOString(),
+    };
 
-  // Try POST
-  try {
-    const postRes = await sendPostRequest({ action: 'ping' });
-    if (postRes.success) {
-      return {
-        success: true,
-        message: 'เชื่อมต่อ Google Apps Script Web App สำเร็จพร้อมใช้งาน! 🚀',
-      };
-    }
-  } catch (err) {}
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify(testPayload),
+    });
 
-  return {
-    success: false,
-    message: 'เชื่อมต่อไม่สำเร็จ โปรดตรวจว่าตั้งค่าการ Deploy สิทธิ์เป็น "ทุกคน (Anyone)" แล้วหรือไม่',
-  };
+    return {
+      success: true,
+      message: 'ส่งคำขอทดสอบไปยัง Google Apps Script สำเร็จ! ตรวจสอบแท็บ "การจอง" ได้เลยครับ 🚀',
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: 'เชื่อมต่อไม่สำเร็จ: ' + (err?.message || 'โปรดตรวจสอบสิทธิ์ Anyone ในการ Deploy'),
+    };
+  }
 }

@@ -1,6 +1,11 @@
 import React, { createContext, useContext, useEffect, useState, useMemo, useCallback } from 'react';
 import { Room, Booking, SystemSettings, Announcement, NotificationItem, ApproverRole } from '../types';
-import { fetchFullData, getWebhookUrl } from '../services/sheetsService';
+import { getWebhookUrl } from '../services/sheetsService';
+import {
+  subscribeRooms,
+  subscribeBookings,
+  subscribeNotifications,
+} from '../services/firestoreService';
 import { INITIAL_ROOMS, DEFAULT_SYSTEM_SETTINGS } from '../config/constants';
 import { getTodayString, getCurrentTimeString } from '../utils/dateUtils';
 
@@ -82,38 +87,30 @@ export const BookingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // โหลดข้อมูลแบบเรียลไทม์จาก Google Apps Script Backend
   const refreshData = useCallback(async () => {
-    try {
-      const data = await fetchFullData();
-      if (data.rooms && data.rooms.length > 0) {
-        setRooms(data.rooms);
-      }
-      setBookings(data.bookings);
-      if (data.settings && Object.keys(data.settings).length > 0) {
-        setSettings((prev) => ({
-          ...prev,
-          ...data.settings,
-        }));
-      }
-      setAnnouncements(data.announcements);
-      setIsBackendConnected(true);
-    } catch (err) {
-      console.warn('refreshData error:', err);
-      setIsBackendConnected(false);
-    } finally {
-      setLoading(false);
-    }
+    // Data updates automatically via subscriptions
+    setLoading(false);
   }, []);
 
-  // Polling ทุก 12 วินาที ตามข้อกำหนด (10-15 วินาที)
+  // Subscribe to real-time local / Firestore changes
   useEffect(() => {
-    refreshData();
-    const timer = setInterval(() => {
-      refreshData();
-    }, 12000);
-    return () => clearInterval(timer);
-  }, [refreshData]);
+    const unsubRooms = subscribeRooms((rList) => {
+      setRooms(rList);
+    });
+    const unsubBookings = subscribeBookings((bList) => {
+      setBookings(bList);
+      setLoading(false);
+    });
+    const unsubNotifs = subscribeNotifications((nList) => {
+      setNotifications(nList);
+    });
+
+    return () => {
+      unsubRooms();
+      unsubBookings();
+      unsubNotifs();
+    };
+  }, []);
 
   // ตรวจจับ URL parameter เพื่อ Auto-Login ผ่าน Role Token ประจำตำแหน่ง
   useEffect(() => {

@@ -14,7 +14,9 @@ import { db, isFirebaseConfigured } from '../config/firebase';
 import { Booking, Room, NotificationItem } from '../types';
 import { INITIAL_ROOMS } from '../config/constants';
 import { isTimeSlotConflicting } from '../utils/dateUtils';
-import { syncToGoogleSheet, fetchBookingsFromGoogleSheet, getWebhookUrl } from './sheetsService';
+import { sendBookingToGoogleSheet, getWebhookUrl } from './sheetsService';
+
+export const syncToGoogleSheet = sendBookingToGoogleSheet;
 
 const LS_BOOKINGS_KEY = 'smart_meeting_bookings_v3';
 const LS_ROOMS_KEY = 'smart_meeting_rooms_v3';
@@ -126,55 +128,18 @@ export function subscribeBookings(callback: (bookings: Booking[]) => void): () =
     );
   }
 
-  // 1. Emit local cache immediately
+  // Emit local cache immediately and listen for changes
   const emitLocal = () => {
     const local = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
     callback(local);
   };
   emitLocal();
 
-  // 2. Poll Google Sheet for live updates across devices
-  const syncFromGoogleSheet = async () => {
-    if (!getWebhookUrl()) return;
-    const sheetBookings = await fetchBookingsFromGoogleSheet();
-    if (sheetBookings && sheetBookings.length > 0) {
-      // Merge with any local bookings
-      const local = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
-      const mergedMap = new Map<string, Booking>();
-      local.forEach((b) => mergedMap.set(b.bookingCode, b));
-      sheetBookings.forEach((b) => {
-        if (!b.bookingCode) return;
-        if (!b.roomId) {
-          const foundRoom = INITIAL_ROOMS.find((r) => r.name === b.roomName) || INITIAL_ROOMS[0];
-          b.roomId = foundRoom.id;
-        }
-        if (!b.roomColor) {
-          const foundRoom = INITIAL_ROOMS.find((r) => r.id === b.roomId);
-          b.roomColor = foundRoom?.color || '#8B5CF6';
-        }
-        if (!b.startDateTime && b.date && b.startTime) {
-          b.startDateTime = `${b.date}T${b.startTime}:00`;
-        }
-        if (!b.endDateTime && b.date && b.endTime) {
-          b.endDateTime = `${b.date}T${b.endTime}:00`;
-        }
-        mergedMap.set(b.bookingCode, b);
-      });
-      const merged = Array.from(mergedMap.values());
-      saveLocalData(LS_BOOKINGS_KEY, merged);
-      callback(merged);
-    }
-  };
-
-  syncFromGoogleSheet();
-  const pollInterval = setInterval(syncFromGoogleSheet, 4000); // Poll Google Sheet every 4s for cross-device real-time sync
-
   const listener = () => emitLocal();
   localEventBus.addEventListener('datachange', listener);
   window.addEventListener('storage', listener);
 
   return () => {
-    clearInterval(pollInterval);
     localEventBus.removeEventListener('datachange', listener);
     window.removeEventListener('storage', listener);
   };
@@ -602,6 +567,135 @@ export async function cancelBooking(
   );
 
   return { success: true };
+}
+
+/**
+ * Approve or process 4-Stage Approval Step for a booking:
+ * - Updates local/Firestore booking record
+ * - Sends copy to Google Sheet in background (One-way)
+ */
+export async function approveBookingStep(params: {
+  bookingCode: string;
+  step: 2 | 3 | 4;
+  stepAction: string;
+  actorName: string;
+  actorRole: string;
+  note?: string;
+}): Promise<{ success: boolean; booking?: Booking; error?: string }> {
+  const { bookingCode, step, stepAction, actorName, actorRole, note } = params;
+  const now = new Date().toISOString();
+
+  let list = getStoredLocalData<Booking[]>(LS_BOOKINGS_KEY, []);
+  const idx = list.findIndex((b) => b.bookingCode === bookingCode);
+  if (idx === -1) return { success: false, error: 'ไม่พบรหัสการจองนี้' };
+
+  const current = list[idx];
+  let newStatus = current.status;
+  let newStatusThai = current.statusThai || '';
+  let nextStep = current.currentStep;
+
+  const logs = Array.isArray(current.logs) ? [...current.logs] : [];
+
+  if (step === 2) {
+    current.step2StaffName = actorName;
+    current.step2StaffStatus = stepAction === 'ready' ? 'ready' : 'not_ready';
+    current.step2StaffNote = note || '';
+    current.step2StaffTimestamp = now;
+
+    if (stepAction === 'ready') {
+      newStatus = 'pending_step3';
+      newStatusThai = 'รอรับรอง (ขั้น 3)';
+      nextStep = 3;
+    } else {
+      newStatus = 'rejected';
+      newStatusThai = 'ไม่พร้อมใช้งาน (ส่งกลับ)';
+    }
+
+    logs.push({
+      step: 2,
+      title: 'ตรวจความพร้อมห้องและโสตฯ',
+      actorName,
+      actorRole: actorRole as any,
+      action: stepAction as any,
+      statusThai: stepAction === 'ready' ? 'พร้อมใช้งาน' : 'ไม่พร้อมใช้งาน',
+      note: note || '',
+      timestamp: now,
+    });
+  } else if (step === 3) {
+    current.step3ChiefName = actorName;
+    current.step3ChiefStatus = stepAction === 'endorsed' ? 'endorsed' : 'returned';
+    current.step3ChiefNote = note || '';
+    current.step3ChiefTimestamp = now;
+
+    if (stepAction === 'endorsed') {
+      newStatus = 'pending_step4';
+      newStatusThai = 'รอพิจารณาอนุมัติ (ขั้น 4)';
+      nextStep = 4;
+    } else {
+      newStatus = 'rejected';
+      newStatusThai = 'ส่งกลับแก้ไข';
+    }
+
+    logs.push({
+      step: 3,
+      title: 'รับรองคำขอใช้ห้องประชุม',
+      actorName,
+      actorRole: actorRole as any,
+      action: stepAction as any,
+      statusThai: stepAction === 'endorsed' ? 'รับรองแล้ว' : 'ส่งกลับแก้ไข',
+      note: note || '',
+      timestamp: now,
+    });
+  } else if (step === 4) {
+    current.step4DeputyName = actorName;
+    current.step4DeputyStatus = stepAction === 'approved' ? 'approved' : 'rejected';
+    current.step4DeputyNote = note || '';
+    current.step4DeputyTimestamp = now;
+
+    if (stepAction === 'approved') {
+      newStatus = 'approved';
+      newStatusThai = 'อนุมัติเรียบร้อย';
+    } else {
+      newStatus = 'rejected';
+      newStatusThai = 'ไม่อนุมัติ';
+    }
+
+    logs.push({
+      step: 4,
+      title: 'พิจารณาอนุมัติขั้นสุดท้าย',
+      actorName,
+      actorRole: actorRole as any,
+      action: stepAction as any,
+      statusThai: stepAction === 'approved' ? 'อนุมัติแล้ว' : 'ไม่อนุมัติ',
+      note: note || '',
+      timestamp: now,
+    });
+  }
+
+  const updatedBooking: Booking = {
+    ...current,
+    status: newStatus,
+    statusThai: newStatusThai,
+    currentStep: nextStep,
+    logs,
+    updatedAt: now,
+  };
+
+  list[idx] = updatedBooking;
+  saveLocalData(LS_BOOKINGS_KEY, list);
+
+  // Send copy to Google Sheet in background
+  syncToGoogleSheet(updatedBooking, 'status_change').catch(console.warn);
+
+  await addNotification(
+    'step_approved',
+    '🔔 อัปเดตสถานะการอนุมัติ',
+    `รหัส ${bookingCode} (${newStatusThai}) ดำเนินการโดย ${actorName}`,
+    updatedBooking.id,
+    bookingCode
+  );
+
+  return { success: true, booking: updatedBooking };
 }
 
 /**

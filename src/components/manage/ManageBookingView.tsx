@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useBookingContext } from '../../context/BookingContext';
 import { formatThaiDate } from '../../utils/dateUtils';
-import { apiCancelBooking } from '../../services/sheetsService';
+import { cancelBooking as apiCancelBooking } from '../../services/firestoreService';
 import { Booking } from '../../types';
 import { showSuccessAlert, showErrorAlert, showConfirmAlert, showLoadingAlert, closeAlert } from '../../utils/alertUtils';
 import { OfficialRequestPrintModal } from '../reports/OfficialRequestPrintModal';

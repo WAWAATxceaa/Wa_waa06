@@ -19,7 +19,7 @@ import {
 import { useBookingContext } from '../../context/BookingContext';
 import { formatThaiDate } from '../../utils/dateUtils';
 import { Booking, ApproverRole } from '../../types';
-import { apiApproveStep } from '../../services/sheetsService';
+import { approveBookingStep as apiApproveStep } from '../../services/firestoreService';
 import { showSuccessAlert, showErrorAlert, showPromptAlert, showLoadingAlert, closeAlert } from '../../utils/alertUtils';
 import { RoleLoginModal } from '../common/RoleLoginModal';
 import { OfficialRequestPrintModal } from '../reports/OfficialRequestPrintModal';

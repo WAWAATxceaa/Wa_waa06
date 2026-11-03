@@ -25,7 +25,8 @@ import { useBookingContext } from '../../context/BookingContext';
 import { DEPARTMENTS, DEFAULT_EQUIPMENT } from '../../config/constants';
 import { formatThaiDate, getTodayString } from '../../utils/dateUtils';
 import { generateBookingCode } from '../../utils/codeGenerator';
-import { apiCreateBooking, apiUploadAttachment } from '../../services/sheetsService';
+import { createBooking } from '../../services/firestoreService';
+import { sendBookingToGoogleSheet, apiUploadAttachment } from '../../services/sheetsService';
 import { BookingSuccessModal } from './BookingSuccessModal';
 import { Booking, EquipmentSelection } from '../../types';
 import { showErrorAlert, showLoadingAlert, closeAlert } from '../../utils/alertUtils';
@@ -213,7 +214,7 @@ export const BookingFormView: React.FC = () => {
         : department;
 
       const code = generateBookingCode();
-      const newBookingPayload: Partial<Booking> = {
+      const newBookingPayload = {
         bookingCode: code,
         roomId: selectedRoom.id,
         roomName: selectedRoom.name,
@@ -222,6 +223,8 @@ export const BookingFormView: React.FC = () => {
         date,
         startTime,
         endTime,
+        startDateTime: `${date}T${startTime}:00`,
+        endDateTime: `${date}T${endTime}:00`,
         participantCount: Number(participantCount) || 1,
         bookerName: bookerName.trim(),
         bookerPosition: bookerPosition.trim(),
@@ -229,60 +232,35 @@ export const BookingFormView: React.FC = () => {
         bookerContact: bookerContact.trim(),
         title: title.trim(),
         description: description.trim(),
+        equipment,
         amenitiesText: eqItems.join(', '),
         extraTableCount: equipment.extraTableCount || 0,
         extraChairCount: equipment.extraChairCount || 0,
         attachmentUrl: uploadedAttachmentUrl,
         attachmentName: uploadedAttachmentName,
         assetCareConfirmed: true,
+        status: 'pending_step2' as const,
+        statusThai: 'รอตรวจความพร้อมห้อง/โสตฯ (ขั้น 2)',
+        currentStep: 2 as const,
+        step1SubmittedAt: new Date().toISOString(),
+        logs: [{
+          step: 1 as const,
+          title: 'ยื่นคำขอใช้ห้องประชุม',
+          actorName: bookerName.trim(),
+          actorRole: 'requester' as const,
+          action: 'submit' as const,
+          statusThai: 'ยื่นคำขอแล้ว',
+          timestamp: new Date().toISOString(),
+        }],
       };
 
-      const result = await apiCreateBooking(newBookingPayload);
+      const result = await createBooking(newBookingPayload);
       closeAlert();
 
-      if (result.success) {
-        const fullBooking: Booking = {
-          id: `bk-${Date.now()}`,
-          bookingCode: result.bookingCode || code,
-          roomId: selectedRoom.id,
-          roomName: selectedRoom.name,
-          otherRoomName: isOtherRoom ? otherRoomName.trim() : '',
-          roomColor: selectedRoom.color,
-          date,
-          startTime,
-          endTime,
-          startDateTime: `${date}T${startTime}:00`,
-          endDateTime: `${date}T${endTime}:00`,
-          participantCount: Number(participantCount) || 1,
-          bookerName: bookerName.trim(),
-          bookerPosition: bookerPosition.trim(),
-          department: resolvedDepartment,
-          bookerContact: bookerContact.trim(),
-          title: title.trim(),
-          description: description.trim(),
-          equipment,
-          amenitiesText: eqItems.join(', '),
-          attachmentUrl: uploadedAttachmentUrl,
-          attachmentName: uploadedAttachmentName,
-          assetCareConfirmed: true,
-          status: 'pending_step2',
-          statusThai: 'รอตรวจความพร้อมห้อง/โสตฯ (ขั้น 2)',
-          currentStep: 2,
-          step1SubmittedAt: new Date().toISOString(),
-          logs: [{
-            step: 1,
-            title: 'ยื่นคำขอใช้ห้องประชุม',
-            actorName: bookerName.trim(),
-            actorRole: 'requester',
-            action: 'submit',
-            statusThai: 'ยื่นคำขอแล้ว',
-            timestamp: new Date().toISOString(),
-          }],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-
-        setCreatedBooking(fullBooking);
+      if (result.success && result.booking) {
+        setCreatedBooking(result.booking);
+        // ส่งสำเนาไปยัง Google Sheet ในเบื้องหลัง (ไม่ให้ผู้ใช้ต้องรอ)
+        sendBookingToGoogleSheet(result.booking, 'create').catch(console.warn);
         await refreshData();
       } else {
         showErrorAlert('ไม่สามารถยื่นคำขอได้', result.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
