@@ -61,7 +61,8 @@ export async function seedInitialRoomsIfEmpty(): Promise<void> {
     }
   } else {
     const localRooms = getStoredLocalData<Room[]>(LS_ROOMS_KEY, []);
-    if (localRooms.length === 0) {
+    const hasOldCollegeRooms = localRooms.some((r) => r.id === 'room-adireksarn' || r.name.includes('อดิเรกสาร'));
+    if (localRooms.length === 0 || hasOldCollegeRooms) {
       saveLocalData(LS_ROOMS_KEY, INITIAL_ROOMS);
     }
   }

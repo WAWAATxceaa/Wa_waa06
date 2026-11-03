@@ -36,7 +36,7 @@ export const BookingFormView: React.FC = () => {
   const navigate = useNavigate();
   const { rooms, bookings, settings, refreshData } = useBookingContext();
 
-  const preselectedRoomId = searchParams.get('roomId') || (rooms[0]?.id ?? 'room-adireksarn');
+  const preselectedRoomId = searchParams.get('roomId') || (rooms[0]?.id ?? 'room-1');
   const preselectedDate = searchParams.get('date') || getTodayString();
   const preselectedStart = searchParams.get('startTime') || '09:00';
   const preselectedEnd = searchParams.get('endTime') || '11:00';

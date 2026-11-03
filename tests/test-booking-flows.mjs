@@ -56,8 +56,8 @@ function validateWorkflowStep(currentStep, incomingStep, action) {
 const mockBookings = [
   {
     bookingCode: 'TTC-A101',
-    roomId: 'room-adireksarn',
-    roomName: 'หอประชุมอดิเรกสาร',
+    roomId: 'room-1',
+    roomName: 'Cyber Neon Horizon (ห้องใหญ่)',
     date: '2026-11-05',
     startTime: '09:00',
     endTime: '11:00',
@@ -81,8 +81,8 @@ const mockBookings = [
 console.log('--- TEST 1: Partial Time Overlap Detection ---');
 const overlapTest = checkBookingConflict(
   mockBookings,
-  'room-adireksarn',
-  'หอประชุมอดิเรกสาร',
+  'room-1',
+  'Cyber Neon Horizon (ห้องใหญ่)',
   '',
   '2026-11-05',
   '10:30',
@@ -107,8 +107,8 @@ console.log('✅ TEST 2 PASSED: Cancelled booking freed time slot for new bookin
 console.log('--- TEST 3: Adjacent Booking (Non-overlapping) ---');
 const adjacentTest = checkBookingConflict(
   mockBookings,
-  'room-adireksarn',
-  'หอประชุมอดิเรกสาร',
+  'room-1',
+  'Cyber Neon Horizon (ห้องใหญ่)',
   '',
   '2026-11-05',
   '11:00',
