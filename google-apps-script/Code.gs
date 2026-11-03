@@ -40,9 +40,51 @@ const HEADERS = [
 ];
 
 /**
+ * =========================================================================
+ * 1. ฟังก์ชันทดสอบการเขียนข้อมูล (testWrite) - ฟังก์ชันเริ่มต้น
+ * =========================================================================
+ * วิธีทดสอบ: สามารถกดปุ่ม "เรียกใช้" (Run) ได้ทันที
+ */
+function testWrite() {
+  const testData = {
+    action: 'test',
+    bookingCode: 'TEST-9999',
+    status: 'อนุมัติเรียบร้อย',
+    statusThai: 'อนุมัติเรียบร้อย',
+    roomName: 'Cyber Neon Horizon (ห้องใหญ่)',
+    date: '2026-11-05',
+    startTime: '09:00',
+    endTime: '11:00',
+    participantCount: 20,
+    amenitiesText: 'โปรเจกเตอร์ 4K, สมาร์ททีวี 75 นิ้ว',
+    bookerName: 'นายทดสอบ บันทึกระบบ',
+    bookerPosition: 'เจ้าหน้าที่งานศูนย์ดิจิทัลฯ',
+    department: 'ฝ่ายพัฒนาซอฟต์แวร์ (Dev & Tech)',
+    bookerContact: '081-234-5678',
+    title: 'ทดสอบการส่งข้อมูลเข้า Google Sheet (แท็บ การจอง)',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const result = writeBookingToSheet(testData);
+  Logger.log('==============================================');
+  Logger.log('ผลการทดสอบ testWrite: ' + JSON.stringify(result));
+  Logger.log('เปิดดูแท็บ "การจอง" ใน Google Sheet ได้เลยครับ 🚀');
+  Logger.log('==============================================');
+  return result;
+}
+
+/**
  * ดึงหรือสร้างแท็บ "การจอง" อัตโนมัติ (ไม่พึ่งพา Sheet1 หรือชื่อภาษาอังกฤษ)
  */
 function getBookingSheet(ss) {
+  if (!ss) {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+  }
+  if (!ss) {
+    throw new Error('ไม่พบ Google Sheet: กรุณาเปิด Apps Script จากเมนู "ส่วนขยาย (Extensions) > Apps Script" ภายในไฟล์ Google Sheet ของคุณ');
+  }
+
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) {
     // ตรวจดูว่าชีตแรกยังว่างอยู่หรือไม่ (เช่น ชีตเริ่มต้นชื่อ "ชีต1")
@@ -76,6 +118,11 @@ function getBookingSheet(ss) {
  * doPost(e): รับข้อมูลการจองใหม่ / แก้ไข / ยกเลิก / เปลี่ยนสถานะ แล้วบันทึกลง Google Sheet
  */
 function doPost(e) {
+  if (!e || !e.postData || !e.postData.contents) {
+    Logger.log('doPost ถูกกดเรียกใช้โดยตรงใน Apps Script Editor: ระบบกำลังรันทดสอบด้วย testWrite()...');
+    return testWrite();
+  }
+
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000); // รอคิวไม่เกิน 10 วินาที
@@ -84,9 +131,6 @@ function doPost(e) {
   }
 
   try {
-    if (!e || !e.postData || !e.postData.contents) {
-      return createJsonResponse({ ok: false, error: 'ไม่พบข้อมูลคำขอ (No POST data)' }, 400);
-    }
 
     let data;
     try {
@@ -130,6 +174,9 @@ function doPost(e) {
  * บันทึกแถวใหม่ หรืออัปเดตแถวเดิมตาม Booking Code
  */
 function writeBookingToSheet(data) {
+  if (!data) {
+    return testWrite();
+  }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = getBookingSheet(ss);
 
@@ -261,44 +308,4 @@ function forcePlainText(val) {
 function createJsonResponse(obj, statusCode) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
-}
-
-/**
- * =========================================================================
- * ฟังก์ชันทดสอบการเขียนข้อมูล (testWrite)
- * =========================================================================
- * วิธีใช้งาน:
- * 1. ใน Apps Script เลือกฟังก์ชัน "testWrite" ที่เมนูด้านบน
- * 2. กดปุ่ม "เรียกใช้" (Run)
- * 3. ตรวจดูในแท็บ "การจอง" จะมีแถวรหัส TEST-9999 เพิ่มขึ้นมาทันที
- */
-function testWrite() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const testData = {
-    action: 'test',
-    bookingCode: 'TEST-9999',
-    status: 'อนุมัติเรียบร้อย',
-    statusThai: 'อนุมัติเรียบร้อย',
-    roomName: 'หอประชุมอดิเรกสาร',
-    date: '2026-11-05',
-    startTime: '09:00',
-    endTime: '11:00',
-    participantCount: 50,
-    amenitiesText: 'โปรเจกเตอร์, ระบบเสียงห้องประชุม, ไมโครโฟนไร้สาย',
-    bookerName: 'นายทดสอบ บันทึกระบบ',
-    bookerPosition: 'เจ้าหน้าที่งานศูนย์ดิจิทัลฯ',
-    department: 'งานศูนย์ดิจิทัลและสื่อสารองค์กร',
-    bookerContact: '081-234-5678',
-    title: 'ทดสอบการส่งข้อมูลเข้า Google Sheet (แท็บ การจอง)',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    secretToken: PropertiesService.getScriptProperties().getProperty('SECRET_TOKEN') || 'TTC_SHEET_SECRET_2026'
-  };
-
-  const result = writeBookingToSheet(testData);
-  Logger.log('==============================================');
-  Logger.log('ผลการทดสอบ testWrite: ' + JSON.stringify(result));
-  Logger.log('เปิด Google Sheet ดูแท็บ "การจอง" ได้เลยครับ 🚀');
-  Logger.log('==============================================');
-  return result;
 }
