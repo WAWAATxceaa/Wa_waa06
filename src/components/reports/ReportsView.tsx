@@ -12,10 +12,16 @@ import {
   XCircle,
   Printer,
   ExternalLink,
+  Settings,
+  Send,
+  Loader2,
 } from 'lucide-react';
 import { useBookingContext } from '../../context/BookingContext';
 import { formatThaiDate } from '../../utils/dateUtils';
 import { exportToExcel, exportToCSV } from '../../services/exportService';
+import { getWebhookUrl, sendBookingToGoogleSheet } from '../../services/sheetsService';
+import { GoogleSheetModal } from '../common/GoogleSheetModal';
+import { showSuccessAlert, showErrorAlert, showLoadingAlert, closeAlert, showConfirmAlert } from '../../utils/alertUtils';
 import { DEPARTMENTS } from '../../config/constants';
 import { Booking } from '../../types';
 import { OfficialRequestPrintModal } from './OfficialRequestPrintModal';
@@ -36,6 +42,54 @@ export const ReportsView: React.FC = () => {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [selectedBookingForPrint, setSelectedBookingForPrint] = useState<Booking | null>(null);
+  const [sheetModalOpen, setSheetModalOpen] = useState(false);
+  const [syncingToSheet, setSyncingToSheet] = useState(false);
+
+  const isSheetConnected = !!getWebhookUrl() && getWebhookUrl().trim().startsWith('http');
+
+  const handleSyncToGoogleSheet = async () => {
+    const url = getWebhookUrl();
+    if (!url || !url.trim().startsWith('http')) {
+      setSheetModalOpen(true);
+      return;
+    }
+
+    if (filteredBookings.length === 0) {
+      showErrorAlert('ไม่พบข้อมูล', 'ไม่มีรายการคำขอในตารางให้ส่งออก');
+      return;
+    }
+
+    const confirm = await showConfirmAlert(
+      'ยืนยันส่งข้อมูลเข้า Google Sheet?',
+      `คุณต้องการส่งข้อมูลคำขอที่กำลังแสดงอยู่ในตารางทั้งหมด <b>${filteredBookings.length} รายการ</b> เข้าแท็บ "การจอง" ใน Google Sheet ใช่หรือไม่?`,
+      'ยืนยันส่งข้อมูล',
+      'ยกเลิก'
+    );
+
+    if (!confirm.isConfirmed) return;
+
+    setSyncingToSheet(true);
+    showLoadingAlert(`กำลังส่งข้อมูล ${filteredBookings.length} รายการเข้า Google Sheet...`);
+
+    try {
+      let successCount = 0;
+      for (const b of filteredBookings) {
+        const res = await sendBookingToGoogleSheet(b, 'update');
+        if (res.success) successCount++;
+      }
+
+      closeAlert();
+      await showSuccessAlert(
+        'ส่งข้อมูลเข้า Google Sheet สำเร็จ! ✨',
+        `บันทึกข้อมูลเรียบร้อยแล้วทั้งหมด <b>${successCount}/${filteredBookings.length} รายการ</b> ในแท็บ "การจอง"`
+      );
+    } catch (err: any) {
+      closeAlert();
+      showErrorAlert('ส่งข้อมูลไม่สำเร็จ', err.message || 'โปรดตรวจสอบการเชื่อมต่ออินเทอร์เน็ต');
+    } finally {
+      setSyncingToSheet(false);
+    }
+  };
 
   // Filtered & Sorted Data
   const filteredBookings = useMemo(() => {
@@ -96,22 +150,47 @@ export const ReportsView: React.FC = () => {
         </div>
 
         {/* Export Buttons */}
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
           <button
             onClick={() => exportToCSV(filteredBookings, `ttc-report-${Date.now()}.csv`)}
             disabled={filteredBookings.length === 0}
-            className="px-4 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-100 font-bold text-xs shadow-sm flex items-center gap-2 transition-all disabled:opacity-50"
+            className="px-3.5 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-100 font-bold text-xs shadow-sm flex items-center gap-1.5 transition-all disabled:opacity-50"
           >
             <FileDown className="w-4 h-4 text-cyan-600" />
-            <span>ส่งออก CSV (UTF-8 BOM)</span>
+            <span>ส่งออก CSV</span>
           </button>
           <button
             onClick={() => exportToExcel(filteredBookings, `ttc-report-${Date.now()}.xlsx`)}
             disabled={filteredBookings.length === 0}
-            className="px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md shadow-emerald-600/25 flex items-center gap-2 transition-all disabled:opacity-50"
+            className="px-3.5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md shadow-emerald-600/25 flex items-center gap-1.5 transition-all disabled:opacity-50"
           >
             <FileSpreadsheet className="w-4 h-4" />
-            <span>ส่งออก Excel (.xlsx)</span>
+            <span>ส่งออก Excel</span>
+          </button>
+          <button
+            onClick={handleSyncToGoogleSheet}
+            disabled={syncingToSheet}
+            className="px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-500 via-teal-500 to-violet-600 hover:opacity-95 text-white font-bold text-xs shadow-md shadow-emerald-500/20 flex items-center gap-2 transition-all disabled:opacity-50"
+          >
+            {syncingToSheet ? (
+              <Loader2 className="w-4 h-4 animate-spin text-white" />
+            ) : (
+              <FileSpreadsheet className="w-4 h-4 text-white" />
+            )}
+            <span>ส่งเข้า Google Sheet</span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isSheetConnected ? 'bg-white animate-pulse' : 'bg-amber-300'
+              }`}
+              title={isSheetConnected ? 'เชื่อมต่อ Google Sheet แล้ว' : 'ยังไม่ได้เชื่อมต่อ (คลิกเพื่อตั้งค่า)'}
+            />
+          </button>
+          <button
+            onClick={() => setSheetModalOpen(true)}
+            title="ตั้งค่า Webhook Google Sheet"
+            className="p-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 text-slate-600 dark:text-slate-300 text-xs shadow-sm transition-all"
+          >
+            <Settings className="w-4 h-4 text-emerald-600" />
           </button>
         </div>
       </div>
@@ -307,6 +386,12 @@ export const ReportsView: React.FC = () => {
           onClose={() => setSelectedBookingForPrint(null)}
         />
       )}
+
+      {/* Google Sheet Connection / Sync Modal */}
+      <GoogleSheetModal
+        isOpen={sheetModalOpen}
+        onClose={() => setSheetModalOpen(false)}
+      />
     </div>
   );
 };
