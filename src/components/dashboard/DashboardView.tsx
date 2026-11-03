@@ -357,8 +357,8 @@ export const DashboardView: React.FC = () => {
                   <div className="font-bold text-xs text-slate-900 dark:text-white truncate">
                     {r.name}
                   </div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">
-                    {r.isOther ? 'ระบุสถานที่' : `จุ ${r.capacity} คน`}
+                  <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+                    {r.isOther ? 'ระบุสถานที่' : (r.amenities && r.amenities[0]) || 'อุปกรณ์พร้อมใช้งาน'}
                   </div>
                 </div>
 

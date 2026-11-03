@@ -278,9 +278,9 @@ export const RoomsManagementView: React.FC = () => {
                     <div className="text-xs text-slate-500 dark:text-slate-400 space-y-1.5 my-3">
                       <div>
                         {room.isOther ? (
-                          <span>ความจุ: <strong>ยังไม่ได้ระบุ (ให้กรอกในฟอร์ม)</strong></span>
+                          <span>ประเภท: <strong>สถานที่พิเศษ (ระบุในฟอร์ม)</strong></span>
                         ) : (
-                          <span>ความจุ: <strong>{room.capacity}</strong> คน • ชั้น {room.floor}</span>
+                          <span>ชั้น {room.floor} • อุปกรณ์: {(room.amenities || []).join(', ') || 'อุปกรณ์มาตรฐาน'}</span>
                         )}
                       </div>
                       <div className="text-xs text-slate-600 dark:text-slate-300">

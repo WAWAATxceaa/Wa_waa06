@@ -19,7 +19,7 @@ import { sendBookingToGoogleSheet, getWebhookUrl } from './sheetsService';
 export const syncToGoogleSheet = sendBookingToGoogleSheet;
 
 const LS_BOOKINGS_KEY = 'smart_meeting_bookings_v3';
-const LS_ROOMS_KEY = 'smart_meeting_rooms_v3';
+const LS_ROOMS_KEY = 'smart_meeting_rooms_v6';
 const LS_NOTIFICATIONS_KEY = 'smart_meeting_notifications_v3';
 
 const localEventBus = new EventTarget();
@@ -61,8 +61,8 @@ export async function seedInitialRoomsIfEmpty(): Promise<void> {
     }
   } else {
     const localRooms = getStoredLocalData<Room[]>(LS_ROOMS_KEY, []);
-    const hasOldCollegeRooms = localRooms.some((r) => r.id === 'room-adireksarn' || r.name.includes('อดิเรกสาร'));
-    if (localRooms.length === 0 || hasOldCollegeRooms) {
+    const hasCyberNeon = localRooms.some((r) => r.name.includes('Cyber Neon'));
+    if (localRooms.length === 0 || hasCyberNeon) {
       saveLocalData(LS_ROOMS_KEY, INITIAL_ROOMS);
     }
   }

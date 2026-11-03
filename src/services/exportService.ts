@@ -109,3 +109,29 @@ export function exportToCSV(bookings: Booking[], fileName = 'ttc-meeting-room-re
   link.click();
   document.body.removeChild(link);
 }
+
+/**
+ * 3. Export complete system backup to JSON file (สำรองข้อมูล)
+ */
+export function exportSystemBackup(data: {
+  bookings: any[];
+  rooms: any[];
+  settings: any;
+}, fileName = `ttc-backup-${new Date().toISOString().slice(0, 10)}.json`) {
+  const payload = {
+    ...data,
+    backupVersion: '2.0',
+    system: 'TTC Smart Meeting Room Booking',
+    exportedAt: new Date().toISOString(),
+  };
+  const jsonStr = JSON.stringify(payload, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  link.setAttribute('download', fileName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}

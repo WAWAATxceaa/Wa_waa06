@@ -325,8 +325,10 @@ export const BookingFormView: React.FC = () => {
                         </span>
                         {isSelected && <CheckCircle2 className="w-4 h-4 text-violet-600 dark:text-violet-400" />}
                       </div>
-                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                        {r.isOther ? 'ระบุสถานที่เอง' : `ความจุ: ${r.capacity} คน • ชั้น ${r.floor}`}
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 line-clamp-1">
+                        {r.isOther
+                          ? 'ระบุสถานที่เอง'
+                          : `อุปกรณ์: ${(r.amenities || []).join(', ') || 'อุปกรณ์มาตรฐาน'}`}
                       </div>
                       {isMaint && (
                         <div className="text-[10px] text-rose-500 font-bold mt-1">

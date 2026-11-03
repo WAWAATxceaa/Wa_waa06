@@ -15,10 +15,11 @@ import {
   Settings,
   Send,
   Loader2,
+  Database,
 } from 'lucide-react';
 import { useBookingContext } from '../../context/BookingContext';
 import { formatThaiDate } from '../../utils/dateUtils';
-import { exportToExcel, exportToCSV } from '../../services/exportService';
+import { exportToExcel, exportToCSV, exportSystemBackup } from '../../services/exportService';
 import { getWebhookUrl, sendBookingToGoogleSheet } from '../../services/sheetsService';
 import { GoogleSheetModal } from '../common/GoogleSheetModal';
 import { showSuccessAlert, showErrorAlert, showLoadingAlert, closeAlert, showConfirmAlert } from '../../utils/alertUtils';
@@ -91,6 +92,18 @@ export const ReportsView: React.FC = () => {
     }
   };
 
+  const handleBackupData = () => {
+    exportSystemBackup({
+      bookings,
+      rooms,
+      settings,
+    });
+    showSuccessAlert(
+      'สำรองข้อมูลสำเร็จ ✨',
+      `ดาวน์โหลดไฟล์ Backup (.json) บันทึกคำขอทั้งหมด ${bookings.length} รายการ, ผังห้อง และการตั้งค่าระบบเรียบร้อยแล้ว`
+    );
+  };
+
   // Filtered & Sorted Data
   const filteredBookings = useMemo(() => {
     return bookings
@@ -152,7 +165,7 @@ export const ReportsView: React.FC = () => {
         {/* Export Buttons */}
         <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
           <button
-            onClick={() => exportToCSV(filteredBookings, `ttc-report-${Date.now()}.csv`)}
+            onClick={exportToCSV.bind(null, filteredBookings, `ttc-report-${Date.now()}.csv`)}
             disabled={filteredBookings.length === 0}
             className="px-3.5 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-100 font-bold text-xs shadow-sm flex items-center gap-1.5 transition-all disabled:opacity-50"
           >
@@ -160,12 +173,20 @@ export const ReportsView: React.FC = () => {
             <span>ส่งออก CSV</span>
           </button>
           <button
-            onClick={() => exportToExcel(filteredBookings, `ttc-report-${Date.now()}.xlsx`)}
+            onClick={exportToExcel.bind(null, filteredBookings, `ttc-report-${Date.now()}.xlsx`)}
             disabled={filteredBookings.length === 0}
             className="px-3.5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md shadow-emerald-600/25 flex items-center gap-1.5 transition-all disabled:opacity-50"
           >
             <FileSpreadsheet className="w-4 h-4" />
             <span>ส่งออก Excel</span>
+          </button>
+          <button
+            onClick={handleBackupData}
+            className="px-3.5 py-2.5 rounded-2xl border border-violet-200 dark:border-violet-800 bg-violet-50/80 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 hover:bg-violet-100 font-bold text-xs shadow-sm flex items-center gap-1.5 transition-all"
+            title="ดาวน์โหลดไฟล์สำรองข้อมูลทั้งหมด (Backup JSON)"
+          >
+            <Database className="w-4 h-4 text-violet-600" />
+            <span>สำรองข้อมูล (Backup)</span>
           </button>
           <button
             onClick={handleSyncToGoogleSheet}
