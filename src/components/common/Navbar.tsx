@@ -15,10 +15,13 @@ import {
   Menu,
   X,
   UserCheck,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 import { useBookingContext } from '../../context/BookingContext';
 import { RoleLoginModal } from './RoleLoginModal';
+import { GoogleSheetModal } from './GoogleSheetModal';
+import { getWebhookUrl } from '../../services/sheetsService';
 
 export const Navbar: React.FC = () => {
   const { theme, toggleTheme } = useTheme();
@@ -32,6 +35,9 @@ export const Navbar: React.FC = () => {
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [roleModalOpen, setRoleModalOpen] = useState(false);
+  const [sheetModalOpen, setSheetModalOpen] = useState(false);
+
+  const isSheetConfigured = !!getWebhookUrl() && getWebhookUrl().trim().startsWith('http');
 
   const navLinks = [
     { to: '/', label: 'แดชบอร์ด', icon: LayoutDashboard },
@@ -123,6 +129,21 @@ export const Navbar: React.FC = () => {
                 </div>
               )}
 
+              {/* Google Sheet Connection Button */}
+              <button
+                onClick={() => setSheetModalOpen(true)}
+                title="ตั้งค่าเชื่อมต่อ Google Sheet"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl border border-emerald-200 dark:border-emerald-800/80 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-bold hover:bg-emerald-100 transition-all shadow-sm"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="hidden sm:inline">Google Sheet</span>
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isSheetConfigured ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+              </button>
+
               {/* Theme Toggle */}
               <button
                 onClick={toggleTheme}
@@ -211,6 +232,9 @@ export const Navbar: React.FC = () => {
 
       {/* Role PIN Login Modal */}
       <RoleLoginModal isOpen={roleModalOpen} onClose={() => setRoleModalOpen(false)} />
+
+      {/* Google Sheet Connection Modal */}
+      <GoogleSheetModal isOpen={sheetModalOpen} onClose={() => setSheetModalOpen(false)} />
     </>
   );
 };
