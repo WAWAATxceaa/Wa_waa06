@@ -317,14 +317,25 @@ export function checkBookingConflict(
  * 3. Syncs across all devices
  */
 export async function createBooking(
-  bookingData: Omit<Booking, 'id' | 'createdAt' | 'updatedAt' | 'status'>
+  bookingData: any
 ): Promise<{ success: boolean; booking?: Booking; error?: string }> {
   const now = new Date().toISOString();
   const id = `bk-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
   const newBooking: Booking = {
+    bookerPosition: 'บุคลากร',
+    equipment: {
+      projector: false,
+      soundSystem: false,
+      microphone: false,
+      extraTableChair: false,
+    },
+    assetCareConfirmed: true,
+    currentStep: 2,
+    step1SubmittedAt: now,
+    logs: [],
     ...bookingData,
     id,
-    status: 'confirmed',
+    status: 'pending_step2',
     createdAt: now,
     updatedAt: now,
   };

@@ -1,49 +1,77 @@
 import * as XLSX from 'xlsx';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import { Booking } from '../types';
 import { formatThaiDate } from '../utils/dateUtils';
 
 /**
- * Export Bookings to Excel (.xlsx) using SheetJS
+ * แปลงข้อมูลการจองเป็นตารางสำหรับส่งออกราชการ
  */
-export function exportToExcel(bookings: Booking[], fileName = 'meeting-room-bookings.xlsx') {
-  const data = bookings.map((b) => ({
-    'รหัสการจอง (Code)': b.bookingCode,
-    'สถานะ': b.status === 'confirmed' ? 'ยืนยันแล้ว' : 'ยกเลิก',
-    'ห้องประชุม': b.roomName,
-    'วันที่': b.date,
+function mapBookingToExportRow(b: Booking) {
+  let statusText = b.statusThai || b.status;
+  if (b.status === 'approved') statusText = 'อนุมัติเรียบร้อย';
+  else if (b.status === 'pending_step2') statusText = 'รอตรวจความพร้อมห้อง/โสตฯ';
+  else if (b.status === 'pending_step3') statusText = 'รอรับรอง (หัวหน้าศูนย์ดิจิทัลฯ)';
+  else if (b.status === 'pending_step4') statusText = 'รอพิจารณาอนุมัติ (รอง ผอ.)';
+  else if (b.status === 'rejected') statusText = 'ไม่อนุมัติ/ส่งกลับ';
+  else if (b.status === 'cancelled') statusText = 'ยกเลิกคำขอ';
+
+  return {
+    'รหัสคำขอ (Booking Code)': b.bookingCode,
+    'สถานะคำขอ': statusText,
+    'ขั้นตอนปัจจุบัน': b.currentStep || 1,
+    'ห้องประชุม': b.otherRoomName || b.roomName,
+    'วันที่ขอใช้': b.date,
     'เวลาเริ่ม': b.startTime,
     'เวลาสิ้นสุด': b.endTime,
     'จำนวนผู้เข้าร่วม (คน)': b.participantCount,
-    'อุปกรณ์ที่ใช้': (b.amenities || []).join(', ') || '-',
-    'ผู้จอง': b.bookerName,
-    'แผนก': b.department,
-    'ข้อมูลติดต่อ': b.bookerContact,
-    'หัวข้อการประชุม': b.title,
-    'รายละเอียด': b.description || '-',
-    'วันที่ทำการจอง': formatThaiDate(b.createdAt),
-  }));
+    'ผู้ขอใช้': b.bookerName,
+    'ตำแหน่ง': b.bookerPosition || 'บุคลากร',
+    'หน่วยงาน/แผนกวิชา': b.department,
+    'เบอร์โทรศัพท์': b.bookerContact,
+    'หัวข้อ/วัตถุประสงค์': b.title,
+    'รายละเอียดเพิ่มเติม': b.description || '-',
+    'ครุภัณฑ์ที่ขอใช้': b.amenitiesText || '-',
+    'โต๊ะเสริม (ตัว)': b.extraTableCount || 0,
+    'เก้าอี้เสริม (ตัว)': b.extraChairCount || 0,
+    'ไฟล์แนบ Google Drive': b.attachmentUrl || '-',
+    'ตรวจความพร้อมโสตฯ (ขั้น 2)': b.step2StaffStatus === 'ready' ? `พร้อม (${b.step2StaffName || ''})` : '-',
+    'รับรองคำขอ (ขั้น 3)': b.step3ChiefStatus === 'endorsed' ? `รับรองแล้ว (${b.step3ChiefName || ''})` : '-',
+    'การอนุมัติ (ขั้น 4)': b.step4DeputyStatus === 'approved' ? `อนุมัติแล้ว (${b.step4DeputyName || ''})` : '-',
+    'วันที่ยื่นคำขอ': formatThaiDate(b.createdAt),
+  };
+}
 
+/**
+ * 1. Export Bookings to Excel (.xlsx) using SheetJS
+ */
+export function exportToExcel(bookings: Booking[], fileName = 'ttc-meeting-room-report.xlsx') {
+  const data = bookings.map(mapBookingToExportRow);
   const worksheet = XLSX.utils.json_to_sheet(data);
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'รายงานการจองห้อง');
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'รายงานการใช้ห้องประชุม TTC');
 
-  // Set column widths
+  // Column auto widths
   const colWidths = [
-    { wch: 15 }, // Code
-    { wch: 12 }, // Status
-    { wch: 25 }, // Room
+    { wch: 16 }, // Code
+    { wch: 22 }, // Status
+    { wch: 10 }, // Step
+    { wch: 26 }, // Room
     { wch: 14 }, // Date
     { wch: 10 }, // Start
     { wch: 10 }, // End
     { wch: 18 }, // Attendees
-    { wch: 25 }, // Amenities
-    { wch: 20 }, // Booker
+    { wch: 22 }, // Booker
+    { wch: 20 }, // Position
     { wch: 25 }, // Department
-    { wch: 20 }, // Contact
+    { wch: 18 }, // Contact
     { wch: 30 }, // Topic
     { wch: 25 }, // Note
+    { wch: 25 }, // Amenities
+    { wch: 12 }, // Extra tables
+    { wch: 12 }, // Extra chairs
+    { wch: 30 }, // Attachment URL
+    { wch: 22 }, // Step 2
+    { wch: 22 }, // Step 3
+    { wch: 22 }, // Step 4
     { wch: 20 }, // Created
   ];
   worksheet['!cols'] = colWidths;
@@ -52,59 +80,32 @@ export function exportToExcel(bookings: Booking[], fileName = 'meeting-room-book
 }
 
 /**
- * Export Bookings to PDF using jsPDF + autoTable
+ * 2. Export Bookings to CSV with UTF-8 BOM (\uFEFF)
+ * รับประกันภาษาไทยไม่เพี้ยน ไม่เป็นภาษาต่างดาวเมื่อเปิดใน Microsoft Excel
  */
-export function exportToPDF(bookings: Booking[], title = 'รายงานการจองห้องประชุม (Smart Meeting Room)') {
-  const doc = new jsPDF({
-    orientation: 'landscape',
-    unit: 'mm',
-    format: 'a4',
+export function exportToCSV(bookings: Booking[], fileName = 'ttc-meeting-room-report.csv') {
+  const data = bookings.map(mapBookingToExportRow);
+  if (data.length === 0) return;
+
+  const headers = Object.keys(data[0]);
+  const rows = data.map((row: any) => {
+    return headers
+      .map((header) => {
+        let val = String(row[header] || '').replace(/"/g, '""');
+        return `"${val}"`;
+      })
+      .join(',');
   });
 
-  // Header Title
-  doc.setFontSize(16);
-  doc.text(title, 14, 15);
-  doc.setFontSize(10);
-  doc.text(`สร้างเมื่อ: ${new Date().toLocaleString('th-TH')} | ทั้งหมด: ${bookings.length} รายการ`, 14, 22);
+  // ใส่ UTF-8 BOM (\uFEFF) นำหน้าไฟล์ CSV เสมอ!
+  const csvContent = '\uFEFF' + headers.map((h) => `"${h}"`).join(',') + '\n' + rows.join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
 
-  const tableRows = bookings.map((b, idx) => [
-    idx + 1,
-    b.bookingCode,
-    b.roomName,
-    `${b.date} (${b.startTime}-${b.endTime})`,
-    b.bookerName,
-    b.department,
-    b.title,
-    b.status === 'confirmed' ? 'Confirmed' : 'Cancelled',
-  ]);
-
-  autoTable(doc, {
-    head: [['#', 'Code', 'Room', 'Date & Time', 'Booker', 'Department', 'Topic', 'Status']],
-    body: tableRows,
-    startY: 28,
-    styles: {
-      fontSize: 8,
-      cellPadding: 2,
-    },
-    headStyles: {
-      fillColor: [139, 92, 246], // Gen Z Purple
-      textColor: 255,
-      fontStyle: 'bold',
-    },
-    alternateRowStyles: {
-      fillColor: [248, 250, 252],
-    },
-    columnStyles: {
-      0: { cellWidth: 8 },
-      1: { cellWidth: 20 },
-      2: { cellWidth: 40 },
-      3: { cellWidth: 45 },
-      4: { cellWidth: 35 },
-      5: { cellWidth: 35 },
-      6: { cellWidth: 55 },
-      7: { cellWidth: 25 },
-    },
-  });
-
-  doc.save(`meeting-room-report-${new Date().toISOString().split('T')[0]}.pdf`);
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  link.setAttribute('download', fileName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }

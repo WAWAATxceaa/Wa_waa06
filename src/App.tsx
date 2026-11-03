@@ -11,6 +11,7 @@ import { BookingFormView } from './components/booking/BookingFormView';
 import { ManageBookingView } from './components/manage/ManageBookingView';
 import { ReportsView } from './components/reports/ReportsView';
 import { RoomsManagementView } from './components/rooms/RoomsManagementView';
+import { ApprovalPortalView } from './components/manage/ApprovalPortalView';
 
 export const App: React.FC = () => {
   return (
@@ -32,6 +33,7 @@ export const App: React.FC = () => {
                 <Route path="/book" element={<BookingFormView />} />
                 <Route path="/manage" element={<ManageBookingView />} />
                 <Route path="/manage/:code" element={<ManageBookingView />} />
+                <Route path="/approve" element={<ApprovalPortalView />} />
                 <Route path="/reports" element={<ReportsView />} />
                 <Route path="/rooms" element={<RoomsManagementView />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

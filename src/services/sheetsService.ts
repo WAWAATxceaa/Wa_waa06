@@ -1,14 +1,26 @@
-import { Booking, SheetWebhookPayload } from '../types';
+import { Booking, Room, SystemSettings, Announcement, ApprovalStepLog } from '../types';
+import { INITIAL_ROOMS, DEFAULT_SYSTEM_SETTINGS } from '../config/constants';
 
-export const SECRET_TOKEN = import.meta.env.VITE_SHEETS_SECRET_TOKEN || 'SMART_MEETING_2026_SECURE_KEY';
-const LS_WEBHOOK_KEY = 'smart_room_sheets_webhook_url';
+export const SECRET_TOKEN = import.meta.env.VITE_SHEETS_SECRET_TOKEN || 'TTC_SECURE_KEY_2026';
+const LS_WEBHOOK_KEY = 'ttc_sheets_webhook_url';
+
+export async function fetchBookingsFromGoogleSheet(): Promise<Booking[]> {
+  const full = await fetchFullData();
+  return full.bookings;
+}
+
+export async function syncToGoogleSheet(booking: Booking, action: 'create' | 'update' | 'cancel') {
+  if (action === 'cancel') {
+    return apiCancelBooking(booking.bookingCode, 'ยกเลิกคำขอ');
+  }
+  return apiCreateBooking(booking);
+}
 
 export function getWebhookUrl(): string {
   try {
-    // 1. Check if URL param exists in search or hash (e.g. ?sheet=https://script.google.com/macros/s/.../exec)
     const checkParam = (queryStr: string) => {
       const params = new URLSearchParams(queryStr);
-      return params.get('sheet') || params.get('sheetUrl');
+      return params.get('sheet') || params.get('sheetUrl') || params.get('api');
     };
 
     let fromUrl = checkParam(window.location.search);
@@ -23,9 +35,10 @@ export function getWebhookUrl(): string {
       return decoded;
     }
 
-    const custom = localStorage.getItem(LS_WEBHOOK_KEY);
-    if (custom && custom.trim()) return custom.trim();
+    const saved = localStorage.getItem(LS_WEBHOOK_KEY);
+    if (saved && saved.trim()) return saved.trim();
   } catch (e) {}
+
   return import.meta.env.VITE_SHEETS_WEBHOOK_URL || '';
 }
 
@@ -36,144 +49,225 @@ export function setWebhookUrl(url: string): void {
 }
 
 /**
- * Maps Booking object to Google Sheets Webhook payload format
+ * ดึงข้อมูลทั้งหมดจาก Google Sheet (Single Source of Truth)
  */
-export function createSheetPayload(
-  booking: Booking,
-  action: 'create' | 'update' | 'cancel'
-): SheetWebhookPayload {
-  const statusThai =
-    action === 'cancel' || booking.status === 'cancelled'
-      ? 'ยกเลิก'
-      : action === 'update'
-      ? 'แก้ไข'
-      : 'จองสำเร็จ';
-
-  return {
-    action,
-    bookingCode: booking.bookingCode,
-    status: statusThai,
-    roomName: booking.roomName,
-    date: booking.date,
-    startTime: booking.startTime,
-    endTime: booking.endTime,
-    participantCount: booking.participantCount,
-    amenities: (booking.amenities || []).join(', ') || '-',
-    bookerName: booking.bookerName,
-    department: booking.department,
-    contact: booking.bookerContact,
-    title: booking.title,
-    createdAt: booking.createdAt,
-    updatedAt: booking.updatedAt || booking.createdAt,
-    secretToken: SECRET_TOKEN,
-  };
-}
-
-/**
- * Reads all bookings directly from Google Sheet via doGet
- */
-export async function fetchBookingsFromGoogleSheet(): Promise<Booking[]> {
-  const url = getWebhookUrl();
-  if (!url) return [];
-
-  try {
-    const res = await fetch(url, { method: 'GET' });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (data && Array.isArray(data.bookings)) {
-      return data.bookings;
-    }
-  } catch (err) {
-    // Silently ignore network or offline
-  }
-  return [];
-}
-
-/**
- * Sends a test ping to the Google Sheets Webhook URL to verify connection
- */
-export async function testSheetConnection(urlToTest?: string): Promise<{ success: boolean; message: string }> {
-  const targetUrl = urlToTest?.trim() || getWebhookUrl();
-  if (!targetUrl) {
-    return { success: false, message: 'กรุณากรอก URL ของ Google Apps Script Web App' };
-  }
-
-  try {
-    // 1. Try reading via GET first
-    const getRes = await fetch(targetUrl, { method: 'GET' }).catch(() => null);
-    if (getRes && getRes.ok) {
-      return {
-        success: true,
-        message: 'เชื่อมต่อ Google Sheets Webhook สำเร็จพร้อมซิงค์ข้อมูล! 🚀',
-      };
-    }
-
-    // 2. Try POST with no-cors fallback
-    await fetch(targetUrl, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8',
-      },
-      body: JSON.stringify({
-        action: 'ping',
-        secretToken: SECRET_TOKEN,
-      }),
-    });
-
-    return {
-      success: true,
-      message: 'ส่งคำขอไปยัง Google Apps Script สำเร็จ! ตรวจสอบสิทธิ์ใน Google Sheet ได้เลยครับ',
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      message: `ไม่สามารถเรียก Webhook ได้: ${err.message || 'Network Error'}`,
-    };
-  }
-}
-
-/**
- * Sends booking update to Google Sheet Webhook via fetch POST.
- * Uses mode: 'no-cors' to avoid browser CORS redirect blocking from Google Apps Script.
- * Retries up to 3 times on failure.
- */
-export async function syncToGoogleSheet(
-  booking: Booking,
-  action: 'create' | 'update' | 'cancel' = 'create'
-): Promise<{ success: boolean; message?: string }> {
+export async function fetchFullData(): Promise<{
+  bookings: Booking[];
+  rooms: Room[];
+  settings: Partial<SystemSettings>;
+  announcements: Announcement[];
+}> {
   const url = getWebhookUrl();
   if (!url) {
-    console.log('ℹ️ Google Sheets Webhook URL is not configured. Skipping sheet sync.');
-    return { success: false, message: 'ไม่ได้ตั้งค่า URL Webhook' };
+    return {
+      bookings: [],
+      rooms: INITIAL_ROOMS,
+      settings: DEFAULT_SYSTEM_SETTINGS,
+      announcements: [],
+    };
   }
 
-  const payload = createSheetPayload(booking, action);
-  const maxRetries = 3;
+  try {
+    const res = await fetch(`${url}?type=all&_t=${Date.now()}`, {
+      method: 'GET',
+    });
+    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+    const data = await res.json();
+
+    const bookings: Booking[] = Array.isArray(data.bookings) ? data.bookings : [];
+    const rooms: Room[] = (Array.isArray(data.rooms) && data.rooms.length > 0) ? data.rooms : INITIAL_ROOMS;
+    const settings: Partial<SystemSettings> = data.settings || {};
+    const announcements: Announcement[] = Array.isArray(data.announcements) ? data.announcements : [];
+
+    return { bookings, rooms, settings, announcements };
+  } catch (err) {
+    console.warn('fetchFullData error:', err);
+    return {
+      bookings: [],
+      rooms: INITIAL_ROOMS,
+      settings: DEFAULT_SYSTEM_SETTINGS,
+      announcements: [],
+    };
+  }
+}
+
+/**
+ * ส่งคำขอ POST ไปยัง Google Apps Script Web App
+ */
+async function sendPostRequest(payload: any, maxRetries = 3): Promise<{ success: boolean; data?: any; error?: string }> {
+  const url = getWebhookUrl();
+  if (!url) {
+    return { success: false, error: 'ยังไม่ได้ระบุ Webhook URL ของ Google Apps Script' };
+  }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // mode: 'no-cors' is essential so browser doesn't block Google Apps Script 302 redirect!
-      await fetch(url, {
+      const res = await fetch(url, {
         method: 'POST',
-        mode: 'no-cors',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8',
         },
         body: JSON.stringify(payload),
       });
 
-      console.log(`✅ Google Sheet synced successfully on attempt ${attempt}`);
-      return { success: true };
+      if (res.ok) {
+        const json = await res.json().catch(() => ({ success: true }));
+        return { success: true, data: json };
+      }
     } catch (err) {
-      console.warn(`⚠️ Google Sheet sync attempt ${attempt}/${maxRetries} failed:`, err);
-    }
-
-    if (attempt < maxRetries) {
-      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+      console.warn(`POST attempt ${attempt}/${maxRetries} failed:`, err);
+      // Fallback for CORS redirect
+      if (attempt === maxRetries) {
+        try {
+          await fetch(url, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: {
+              'Content-Type': 'text/plain;charset=utf-8',
+            },
+            body: JSON.stringify(payload),
+          });
+          return { success: true, data: { success: true, noCors: true } };
+        } catch (noCorsErr) {
+          return { success: false, error: 'ไม่สามารถติดต่อเซิร์ฟเวอร์ Google Apps Script ได้' };
+        }
+      }
     }
   }
 
-  console.warn('⚠️ Google Sheet sync failed after 3 attempts.');
-  return { success: false, message: 'ไม่สามารถส่งข้อมูลไปยัง Google Sheet ได้ (ลองครบ 3 ครั้ง)' };
+  return { success: false, error: 'หมดเวลาการเชื่อมต่อ (ลองครบ 3 ครั้ง)' };
+}
+
+/**
+ * 1. ยื่นคำขอจองห้องใหม่ (ขั้นที่ 1)
+ */
+export async function apiCreateBooking(bookingData: Partial<Booking>): Promise<{ success: boolean; bookingCode?: string; error?: string }> {
+  const res = await sendPostRequest({
+    action: 'create_booking',
+    ...bookingData,
+  });
+
+  if (res.success) {
+    return {
+      success: true,
+      bookingCode: res.data?.bookingCode || bookingData.bookingCode,
+    };
+  }
+
+  return { success: false, error: res.data?.error || res.error || 'เกิดข้อผิดพลาดในการส่งคำขอ' };
+}
+
+/**
+ * 2. บันทึกผลการพิจารณาตามสายอนุมัติ 4 ขั้น (ห้ามข้ามขั้น)
+ */
+export async function apiApproveStep(params: {
+  bookingCode: string;
+  step: 2 | 3 | 4;
+  stepAction: string;
+  actorName: string;
+  actorRole: string;
+  note?: string;
+}): Promise<{ success: boolean; status?: string; statusThai?: string; error?: string }> {
+  const res = await sendPostRequest({
+    action: 'approve_step',
+    ...params,
+  });
+
+  if (res.success && res.data?.success !== false) {
+    return {
+      success: true,
+      status: res.data?.status,
+      statusThai: res.data?.statusThai,
+    };
+  }
+
+  return { success: false, error: res.data?.error || res.error || 'ไม่สามารถบันทึกผลการพิจารณาได้' };
+}
+
+/**
+ * 3. ยกเลิกคำขอโดยผู้ขอ
+ */
+export async function apiCancelBooking(bookingCode: string, reason: string): Promise<{ success: boolean; error?: string }> {
+  const res = await sendPostRequest({
+    action: 'cancel_booking',
+    bookingCode,
+    reason,
+  });
+
+  if (res.success && res.data?.success !== false) {
+    return { success: true };
+  }
+
+  return { success: false, error: res.data?.error || res.error || 'ไม่สามารถยกเลิกคำขอได้' };
+}
+
+/**
+ * 4. อัปโหลดไฟล์กำหนดการเข้า Google Drive
+ */
+export async function apiUploadAttachment(file: File): Promise<{ success: boolean; fileUrl?: string; fileName?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64Data = reader.result as string;
+      const res = await sendPostRequest({
+        action: 'upload_attachment',
+        fileName: file.name,
+        mimeType: file.type,
+        base64Data: base64Data,
+      });
+
+      if (res.success && res.data?.fileUrl) {
+        resolve({
+          success: true,
+          fileUrl: res.data.fileUrl,
+          fileName: file.name,
+        });
+      } else {
+        resolve({
+          success: false,
+          error: res.data?.error || 'อัปโหลดไฟล์ไปยัง Google Drive ไม่สำเร็จ',
+        });
+      }
+    };
+    reader.onerror = () => {
+      resolve({ success: false, error: 'ไม่สามารถอ่านไฟล์ได้' });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 5. ทดสอบการเชื่อมต่อ Apps Script
+ */
+export async function testSheetConnection(targetUrl?: string): Promise<{ success: boolean; message: string }> {
+  const url = targetUrl || getWebhookUrl();
+  if (!url) {
+    return { success: false, message: 'กรุณากรอก Webhook URL' };
+  }
+
+  try {
+    const res = await fetch(`${url}?type=ping&_t=${Date.now()}`);
+    if (res.ok) {
+      return {
+        success: true,
+        message: 'เชื่อมต่อ Google Apps Script Web App สำเร็จพร้อมใช้งาน! 🚀',
+      };
+    }
+  } catch (err) {}
+
+  // Try POST
+  try {
+    const postRes = await sendPostRequest({ action: 'ping' });
+    if (postRes.success) {
+      return {
+        success: true,
+        message: 'เชื่อมต่อ Google Apps Script Web App สำเร็จพร้อมใช้งาน! 🚀',
+      };
+    }
+  } catch (err) {}
+
+  return {
+    success: false,
+    message: 'เชื่อมต่อไม่สำเร็จ โปรดตรวจว่าตั้งค่าการ Deploy สิทธิ์เป็น "ทุกคน (Anyone)" แล้วหรือไม่',
+  };
 }
